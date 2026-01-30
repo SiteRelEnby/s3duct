@@ -102,27 +102,29 @@ def run_get(
             chunk_path.unlink()
             chunk_path = dec_path
 
-        # Verify integrity (against plaintext hashes)
-        dual_hash, size = hash_file(chunk_path)
-        expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
+        # Verify integrity (against plaintext hashes) -- skip if raw mode
+        skip_integrity = manifest.encrypted and not decrypt
+        if not skip_integrity:
+            dual_hash, size = hash_file(chunk_path)
+            expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
 
-        if dual_hash != expected:
-            chunk_path.unlink(missing_ok=True)
-            raise click.ClickException(
-                f"Integrity check failed for chunk {chunk_rec.index}. "
-                "Data may be corrupt."
-            )
+            if dual_hash != expected:
+                chunk_path.unlink(missing_ok=True)
+                raise click.ClickException(
+                    f"Integrity check failed for chunk {chunk_rec.index}. "
+                    "Data may be corrupt."
+                )
 
-        if size != chunk_rec.size:
-            chunk_path.unlink(missing_ok=True)
-            raise click.ClickException(
-                f"Size mismatch for chunk {chunk_rec.index}: "
-                f"expected {chunk_rec.size}, got {size}"
-            )
+            if size != chunk_rec.size:
+                chunk_path.unlink(missing_ok=True)
+                raise click.ClickException(
+                    f"Size mismatch for chunk {chunk_rec.index}: "
+                    f"expected {chunk_rec.size}, got {size}"
+                )
 
-        # Verify chain
-        chain_hex = compute_chain(dual_hash, prev_chain)
-        prev_chain = bytes.fromhex(chain_hex)
+            # Verify chain
+            chain_hex = compute_chain(dual_hash, prev_chain)
+            prev_chain = bytes.fromhex(chain_hex)
 
         # Write to stdout
         with open(chunk_path, "rb") as f:
@@ -136,8 +138,9 @@ def run_get(
         # Cleanup
         chunk_path.unlink(missing_ok=True)
 
-    # Verify final chain
-    if prev_chain and manifest.final_chain:
+    # Verify final chain (skip in raw/no-decrypt mode)
+    raw_mode = manifest.encrypted and not decrypt
+    if not raw_mode and prev_chain and manifest.final_chain:
         if prev_chain.hex() != manifest.final_chain:
             raise click.ClickException("Final chain mismatch. Stream may be incomplete or tampered.")
 

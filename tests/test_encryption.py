@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from s3duct.encryption import (
-    age_available, encrypt_file, decrypt_file, get_recipient_from_identity,
+    age_available, age_encrypt_file, age_decrypt_file, get_recipient_from_identity,
     aes_encrypt_file, aes_decrypt_file, parse_key,
 )
 
@@ -39,13 +39,13 @@ def test_encrypt_decrypt_roundtrip(tmp_path):
 
     # Encrypt
     enc = tmp_path / "encrypted.age"
-    encrypt_file(src, enc, recipient)
+    age_encrypt_file(src, enc, recipient)
     assert enc.exists()
     assert enc.read_bytes() != plaintext
 
     # Decrypt
     dec = tmp_path / "decrypted.bin"
-    decrypt_file(enc, dec, str(identity_file))
+    age_decrypt_file(enc, dec, str(identity_file))
     assert dec.read_bytes() == plaintext
 
 
@@ -55,7 +55,7 @@ def test_encrypt_bad_recipient(tmp_path):
     src.write_bytes(b"data")
     dest = tmp_path / "out.age"
     with pytest.raises(RuntimeError, match="age encrypt failed"):
-        encrypt_file(src, dest, "not-a-valid-recipient")
+        age_encrypt_file(src, dest, "not-a-valid-recipient")
 
 
 @skip_no_age
@@ -68,8 +68,8 @@ def test_get_recipient_from_identity(tmp_path):
     assert len(recipient) > 10
 
 
-def test_encrypt_file_mocked(tmp_path, monkeypatch):
-    """Test encrypt_file logic when age is not available."""
+def test_age_encrypt_file_mocked(tmp_path, monkeypatch):
+    """Test age_encrypt_file logic when age is not available."""
     src = tmp_path / "plain.bin"
     src.write_bytes(b"data")
     dest = tmp_path / "out.age"
@@ -79,12 +79,12 @@ def test_encrypt_file_mocked(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr("s3duct.encryption.subprocess.run", mock_run)
-    encrypt_file(src, dest, "fake-recipient")
+    age_encrypt_file(src, dest, "fake-recipient")
     assert dest.exists()
 
 
-def test_decrypt_file_mocked_failure(tmp_path, monkeypatch):
-    """Test decrypt_file error handling."""
+def test_age_decrypt_file_mocked_failure(tmp_path, monkeypatch):
+    """Test age_decrypt_file error handling."""
     src = tmp_path / "enc.age"
     src.write_bytes(b"encrypted")
     dest = tmp_path / "dec.bin"
@@ -94,7 +94,7 @@ def test_decrypt_file_mocked_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr("s3duct.encryption.subprocess.run", mock_run)
     with pytest.raises(RuntimeError, match="age decrypt failed"):
-        decrypt_file(src, dest, "/fake/identity")
+        age_decrypt_file(src, dest, "/fake/identity")
 
 
 # ---------------------------------------------------------------------------

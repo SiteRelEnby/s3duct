@@ -87,31 +87,39 @@ def age_available() -> bool:
     return shutil.which("age") is not None
 
 
+def _run_age(cmd: list[str], description: str) -> subprocess.CompletedProcess:
+    """Run an age/age-keygen command with clear error messages."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"{cmd[0]} not found. Install age: https://github.com/FiloSottile/age"
+        )
+    if result.returncode != 0:
+        raise RuntimeError(f"{description}: {result.stderr.strip()}")
+    return result
+
+
 def age_encrypt_file(source: Path, dest: Path, recipient: str) -> None:
     """Encrypt a file using age with a recipient public key."""
-    cmd = ["age", "-r", recipient, "-o", str(dest), str(source)]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"age encrypt failed: {result.stderr.strip()}")
+    _run_age(
+        ["age", "-r", recipient, "-o", str(dest), str(source)],
+        "age encrypt failed",
+    )
 
 
 def age_decrypt_file(source: Path, dest: Path, identity: str) -> None:
     """Decrypt a file using age with an identity (private key) file."""
-    cmd = ["age", "-d", "-i", identity, "-o", str(dest), str(source)]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"age decrypt failed: {result.stderr.strip()}")
+    _run_age(
+        ["age", "-d", "-i", identity, "-o", str(dest), str(source)],
+        "age decrypt failed",
+    )
 
 
 def get_recipient_from_identity(identity_path: str) -> str:
     """Extract the public key (recipient) from an age identity file."""
-    cmd = ["age-keygen", "-y", identity_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"age-keygen failed: {result.stderr.strip()}")
+    result = _run_age(
+        ["age-keygen", "-y", identity_path],
+        "age-keygen failed",
+    )
     return result.stdout.strip()
-
-
-# Backwards compat aliases
-encrypt_file = age_encrypt_file
-decrypt_file = age_decrypt_file

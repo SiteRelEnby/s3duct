@@ -224,3 +224,43 @@ def test_run_get_aes_roundtrip(download_env):
 
     stdout_mock.buffer.seek(0)
     assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_no_decrypt_raw_download(download_env):
+    """--no-decrypt on an encrypted stream should output raw encrypted chunks without failing."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"raw encrypted download test" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "raw-dl-test", chunk_size=CHUNK_SIZE,
+        encrypt=True, encryption_method="aes-256-gcm",
+        aes_key=aes_key, scratch_dir=scratch,
+    )
+
+    # Download with decrypt=False (--no-decrypt): should succeed, output is encrypted bytes
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(
+        backend, "raw-dl-test", decrypt=False,
+        scratch_dir=scratch,
+    )
+
+    stdout_mock.buffer.seek(0)
+    raw_output = stdout_mock.buffer.read()
+    # Raw output should NOT equal plaintext (it's encrypted)
+    assert raw_output != data
+    # Raw output should not be empty
+    assert len(raw_output) > 0

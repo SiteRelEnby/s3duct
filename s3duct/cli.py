@@ -3,7 +3,7 @@
 import click
 
 from s3duct.backends.s3 import S3Backend
-from s3duct.config import DEFAULT_CHUNK_SIZE, DEFAULT_STORAGE_CLASS
+from s3duct.config import DEFAULT_CHUNK_SIZE, DEFAULT_STORAGE_CLASS, MAX_RETRY_ATTEMPTS
 
 
 def parse_size(value: str) -> int:
@@ -20,6 +20,16 @@ def parse_size(value: str) -> int:
 def main() -> None:
     """s3duct - Chunked, resumable, encrypted pipe to object storage."""
     pass
+
+
+def validate_name(name: str) -> None:
+    """Validate stream name is safe for use as an S3 key prefix."""
+    if not name or not name.strip():
+        raise click.BadParameter("Stream name cannot be empty.")
+    if name.startswith("/") or name.startswith("."):
+        raise click.BadParameter(f"Stream name should not start with '/' or '.': {name!r}")
+    if "//" in name:
+        raise click.BadParameter(f"Stream name should not contain '//': {name!r}")
 
 
 def parse_tag(value: str) -> tuple[str, str]:
@@ -48,7 +58,7 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--diskspace-limit", default=None, help="Max scratch disk usage (e.g., 2G). Must be >= chunk-size.")
 @click.option("--buffer-chunks", default=None, type=int, help="Max buffered chunks in scratch (default: auto).")
 @click.option("--strict-resume/--no-strict-resume", default=True, help="Fail if stdin ends before all resume-log chunks are re-verified (default: on).")
-@click.option("--retries", default=5, type=int, help="Max retry attempts per S3 operation (default: 5).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifest,
         tag, storage_class, region, prefix, endpoint_url, diskspace_limit, buffer_chunks,
@@ -56,6 +66,8 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
     """Upload a stream from stdin to S3."""
     from s3duct.encryption import parse_key
     from s3duct.uploader import run_put
+
+    validate_name(name)
 
     if key and age_identity:
         raise click.ClickException("--key and --age-identity are mutually exclusive.")
@@ -121,12 +133,14 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
-@click.option("--retries", default=5, type=int, help="Max retry attempts per S3 operation (default: 5).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_url, retries, summary):
     """Download a stream from S3 to stdout."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_get
+
+    validate_name(name)
 
     if key and age_identity:
         raise click.ClickException("--key and --age-identity are mutually exclusive.")
@@ -173,11 +187,13 @@ def list_cmd(bucket, prefix, region, endpoint_url):
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
-@click.option("--retries", default=5, type=int, help="Max retry attempts per S3 operation (default: 5).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def verify(bucket, name, region, prefix, endpoint_url, retries, summary):
     """Verify integrity of a stored stream."""
     from s3duct.downloader import run_verify
+
+    validate_name(name)
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)

@@ -4,16 +4,43 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "s3duct"
-version = "0.1.0"
+version = "0.2.0"
 description = "Chunked, resumable, encrypted pipe to S3-compatible object storage"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Elastic-2.0"}
+authors = [
+    {name = "Site Reliability Enby"},
+]
+keywords = [
+    "s3", "backup", "streaming", "encryption", "chunked", "resumable",
+    "object-storage", "pipe", "aes-gcm", "age",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 dependencies = [
     "boto3>=1.28",
     "click>=8.0",
     "cryptography>=41.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/SiteRelEnby/s3duct"
+Issues = "https://github.com/SiteRelEnby/s3duct/issues"
 
 [project.scripts]
 s3duct = "s3duct.cli:main"

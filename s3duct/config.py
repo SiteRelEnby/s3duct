@@ -12,9 +12,9 @@ SCRATCH_DIR = Path.home() / ".s3duct" / "scratch"
 GENESIS_KEY = b"s3duct-genesis"
 READ_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MB read buffer
 
-MAX_RETRY_ATTEMPTS = 5
+MAX_RETRY_ATTEMPTS = 10
 RETRY_BASE_DELAY = 1.0  # seconds
-RETRY_MAX_DELAY = 60.0  # seconds
+RETRY_MAX_DELAY = 120.0  # seconds (~8 min total retry window with exponential backoff)
 
 RESUME_LOG_FILENAME = ".resume.jsonl"
 MANIFEST_FILENAME = ".manifest.json"

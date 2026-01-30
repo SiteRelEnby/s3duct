@@ -3,7 +3,7 @@
 import pytest
 from click.testing import CliRunner
 
-from s3duct.cli import main, parse_size, parse_tag
+from s3duct.cli import main, parse_size, parse_tag, validate_name
 
 
 def test_parse_size_bytes():
@@ -128,6 +128,39 @@ def test_cli_put_encrypt_manifest_option():
     runner = CliRunner()
     result = runner.invoke(main, ["put", "--help"])
     assert "--encrypt-manifest" in result.output
+
+
+def test_validate_name_valid():
+    validate_name("my-backup")
+    validate_name("project/daily")
+    validate_name("a")
+
+
+def test_validate_name_empty():
+    with pytest.raises(Exception):
+        validate_name("")
+    with pytest.raises(Exception):
+        validate_name("   ")
+
+
+def test_validate_name_bad_prefix():
+    with pytest.raises(Exception):
+        validate_name("/leading-slash")
+    with pytest.raises(Exception):
+        validate_name(".hidden")
+
+
+def test_validate_name_double_slash():
+    with pytest.raises(Exception):
+        validate_name("bad//path")
+
+
+def test_cli_put_empty_name():
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "put", "--bucket", "b", "--name", "",
+    ], input="")
+    assert result.exit_code != 0
 
 
 def test_cli_put_encrypt_manifest_requires_key():
