@@ -1,0 +1,37 @@
+services:
+  minio:
+    image: minio/minio
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy
+    ports:
+      - "8474:8474"   # admin API
+      - "19000:19000"  # proxied MinIO
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  toxiproxy-setup:
+    image: curlimages/curl
+    depends_on:
+      - toxiproxy
+    # Create the minio proxy: listen on 19000, forward to minio:9000
+    entrypoint: >
+      sh -c '
+        sleep 2 &&
+        curl -sf -X POST http://toxiproxy:8474/proxies \
+          -H "Content-Type: application/json" \
+          -d "{\"name\":\"minio\",\"listen\":\"0.0.0.0:19000\",\"upstream\":\"minio:9000\"}" &&
+        echo "toxiproxy proxy created"
+      '

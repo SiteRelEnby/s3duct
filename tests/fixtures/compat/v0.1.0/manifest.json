@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "name": "compat-v010",
+  "created": "2026-01-30T15:27:49.308659+00:00",
+  "tool_version": "0.1.0",
+  "chunk_count": 3,
+  "chunk_size": 64,
+  "total_bytes": 168,
+  "encrypted": false,
+  "encrypted_manifest": false,
+  "encryption_method": null,
+  "encryption_recipient": null,
+  "storage_class": null,
+  "tags": {
+    "fixture": "v0.1.0"
+  },
+  "chunks": [
+    {
+      "index": 0,
+      "s3_key": "compat-v010/chunk-000000",
+      "size": 64,
+      "sha256": "e82206f96ef8f291746c617f07972ab7ecb26683aee9e4730e47cf2e495af698",
+      "sha3_256": "9cecf05d4211928bcd692135d51ba07d0d49a12e23cacf6d73289380fe1a6ebc",
+      "etag": "\"ec1466e9d7da0e06fe7006f2e5afd9cb\""
+    },
+    {
+      "index": 1,
+      "s3_key": "compat-v010/chunk-000001",
+      "size": 64,
+      "sha256": "ef7716ad0ae0f9384591af8831dfa534fd505db3b80f6413a9ae407611e5aec2",
+      "sha3_256": "a116823ec5c1cbf0b9185068898815d8bd72c07b5d6f047be3a97fc45b7d152a",
+      "etag": "\"b90046f2f48d23d0b600aa8f45ec4bf0\""
+    },
+    {
+      "index": 2,
+      "s3_key": "compat-v010/chunk-000002",
+      "size": 40,
+      "sha256": "fa26b82393853ad728e991fc23830ec7500f382d895fb8d73755536de8a8f699",
+      "sha3_256": "adb18e3148472944929fea3f9e45a7960770f9c2ff6b7121adf9ba47176a43d6",
+      "etag": "\"e6b6e1b28b1526a5dbf2423ae71f923e\""
+    }
+  ],
+  "final_chain": "158f10fb4554e5ff241853e6a01765fe4b98410110214499ece5dde3adce7627",
+  "stream_sha256": "87eca8293fbc672f0fe8994715bc3fc631e4a8ea7f082f6a229ec99756031324",
+  "stream_sha3_256": "328a13380a0fbcf0b4fd14dbe40ca7403fea25d4c651e91181bffa639eab0ca5"
+}

@@ -1,0 +1,373 @@
+name: Cloud Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      simple:
+        description: "Basic S3 roundtrip (upload, download, verify)"
+        type: boolean
+        default: false
+      backends:
+        description: "All S3-compatible backends (R2, B2, MinIO)"
+        type: boolean
+        default: false
+      huge_file:
+        description: "Large file stress test (multi-GB)"
+        type: boolean
+        default: false
+      glacier:
+        description: "Glacier lifecycle (upload, thaw, restore)"
+        type: boolean
+        default: false
+      compat:
+        description: "Backward compatibility (restore old manifests)"
+        type: boolean
+        default: false
+
+env:
+  S3DUCT_TEST_PREFIX: "ci-${{ github.run_id }}"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Simple: basic upload/download/verify on AWS S3
+  # --------------------------------------------------------------------------
+  simple:
+    if: ${{ inputs.simple }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3DUCT_TEST_BUCKET: ${{ secrets.S3DUCT_TEST_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Run roundtrip
+        run: bash tests/integration/roundtrip.sh
+
+      - name: Cleanup
+        if: always()
+        run: |
+          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-" --recursive 2>/dev/null || true
+
+  # --------------------------------------------------------------------------
+  # Backends: test all S3-compatible services
+  # --------------------------------------------------------------------------
+  backends-minio:
+    if: ${{ inputs.backends }}
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: minio/minio
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "mc ready local || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install -e ".[dev]" awscli
+          for i in $(seq 1 30); do
+            aws --endpoint-url http://localhost:9000 s3 ls 2>/dev/null && break
+            sleep 2
+          done
+          aws --endpoint-url http://localhost:9000 s3 mb s3://s3duct-test
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+      - name: Run roundtrip
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          S3DUCT_TEST_BUCKET: s3duct-test
+          S3DUCT_ENDPOINT_URL: http://localhost:9000
+        run: bash tests/integration/roundtrip.sh
+
+  backends-r2:
+    if: ${{ inputs.backends }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      S3DUCT_TEST_BUCKET: ${{ secrets.R2_TEST_BUCKET }}
+      S3DUCT_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Run roundtrip
+        if: env.AWS_ACCESS_KEY_ID != ''
+        run: bash tests/integration/roundtrip.sh
+      - name: Skip (no secrets)
+        if: env.AWS_ACCESS_KEY_ID == ''
+        run: echo "R2 secrets not configured, skipping"
+      - name: Cleanup
+        if: always() && env.AWS_ACCESS_KEY_ID != ''
+        run: |
+          pip install awscli
+          aws --endpoint-url "${S3DUCT_ENDPOINT_URL}" s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-" --recursive 2>/dev/null || true
+
+  backends-b2:
+    if: ${{ inputs.backends }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_SECRET_ACCESS_KEY }}
+      S3DUCT_TEST_BUCKET: ${{ secrets.B2_TEST_BUCKET }}
+      S3DUCT_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Run roundtrip
+        if: env.AWS_ACCESS_KEY_ID != ''
+        run: bash tests/integration/roundtrip.sh
+      - name: Skip (no secrets)
+        if: env.AWS_ACCESS_KEY_ID == ''
+        run: echo "B2 secrets not configured, skipping"
+      - name: Cleanup
+        if: always() && env.AWS_ACCESS_KEY_ID != ''
+        run: |
+          pip install awscli
+          aws --endpoint-url "${S3DUCT_ENDPOINT_URL}" s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-" --recursive 2>/dev/null || true
+
+  # --------------------------------------------------------------------------
+  # Huge file: multi-GB stress test
+  # --------------------------------------------------------------------------
+  huge-file:
+    if: ${{ inputs.huge_file }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3DUCT_TEST_BUCKET: ${{ secrets.S3DUCT_TEST_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Generate 2GB test file
+        run: dd if=/dev/urandom of=/tmp/huge-test.bin bs=1M count=2048
+
+      - name: Compute expected hash
+        run: sha256sum /tmp/huge-test.bin | cut -d' ' -f1 > /tmp/expected.sha256
+
+      - name: Upload with backpressure
+        run: |
+          cat /tmp/huge-test.bin | s3duct put \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-huge" \
+            --chunk-size 256M \
+            --diskspace-limit 1G \
+            --tag test=huge-file \
+            --no-encrypt
+
+      - name: Download and verify
+        run: |
+          s3duct get \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-huge" \
+            > /tmp/restored.bin
+          ACTUAL=$(sha256sum /tmp/restored.bin | cut -d' ' -f1)
+          EXPECTED=$(cat /tmp/expected.sha256)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "HASH MISMATCH: expected=$EXPECTED actual=$ACTUAL"
+            exit 1
+          fi
+          echo "Huge file roundtrip OK: $ACTUAL"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-huge/" --recursive 2>/dev/null || true
+          rm -f /tmp/huge-test.bin /tmp/restored.bin /tmp/expected.sha256
+
+  # --------------------------------------------------------------------------
+  # Glacier: upload to GLACIER, thaw, restore
+  # --------------------------------------------------------------------------
+  glacier:
+    if: ${{ inputs.glacier }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # thaw can take hours
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3DUCT_TEST_BUCKET: ${{ secrets.S3DUCT_TEST_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Upload to GLACIER
+        run: |
+          dd if=/dev/urandom bs=1K count=64 | s3duct put \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier" \
+            --chunk-size 32K \
+            --storage-class GLACIER \
+            --tag test=glacier \
+            --no-encrypt
+
+      - name: Initiate restore (Expedited tier)
+        run: |
+          # Expedited tier: 1-5 minutes for GLACIER (not available for DEEP_ARCHIVE)
+          # This uses aws cli directly since s3duct thaw isn't implemented yet
+          MANIFEST_KEY="${S3DUCT_TEST_PREFIX}-glacier/.manifest.json"
+          aws s3 cp "s3://${S3DUCT_TEST_BUCKET}/${MANIFEST_KEY}" /tmp/manifest.json
+          # Extract chunk keys from manifest and request restore for each
+          python3 -c "
+          import json, subprocess, sys, os
+          m = json.load(open('/tmp/manifest.json'))
+          bucket = os.environ['S3DUCT_TEST_BUCKET']
+          for c in m['chunks']:
+              key = c['s3_key']
+              print(f'Restoring {key}...')
+              subprocess.run([
+                  'aws', 's3api', 'restore-object',
+                  '--bucket', bucket,
+                  '--key', key,
+                  '--restore-request', '{\"Days\":1,\"GlacierJobParameters\":{\"Tier\":\"Expedited\"}}'
+              ], check=True)
+          "
+
+      - name: Wait for thaw (poll every 60s, up to 30 min)
+        run: |
+          python3 -c "
+          import json, subprocess, time, os
+          m = json.load(open('/tmp/manifest.json'))
+          bucket = os.environ['S3DUCT_TEST_BUCKET']
+          keys = [c['s3_key'] for c in m['chunks']]
+          for attempt in range(30):
+              all_ready = True
+              for key in keys:
+                  result = subprocess.run(
+                      ['aws', 's3api', 'head-object', '--bucket', bucket, '--key', key],
+                      capture_output=True, text=True
+                  )
+                  output = json.loads(result.stdout) if result.stdout else {}
+                  restore = output.get('Restore', '')
+                  if 'ongoing-request=\"true\"' in restore:
+                      all_ready = False
+                      break
+              if all_ready:
+                  print(f'All chunks thawed after {attempt + 1} poll(s)')
+                  break
+              print(f'Poll {attempt + 1}/30: still thawing...')
+              time.sleep(60)
+          else:
+              print('Timed out waiting for thaw')
+              exit(1)
+          "
+
+      - name: Download and verify
+        run: |
+          s3duct verify \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier"
+          echo "Glacier roundtrip verified"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-glacier/" --recursive 2>/dev/null || true
+
+  # --------------------------------------------------------------------------
+  # Compat: backward compatibility with older manifest versions
+  # --------------------------------------------------------------------------
+  compat:
+    if: ${{ inputs.compat }}
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3DUCT_TEST_BUCKET: ${{ secrets.S3DUCT_TEST_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Test backward compat fixtures
+        run: |
+          for VERSION_DIR in tests/fixtures/compat/v*/; do
+            VERSION=$(basename "$VERSION_DIR")
+            echo "Testing compat with $VERSION..."
+
+            STREAM_NAME="${S3DUCT_TEST_PREFIX}-compat-${VERSION}"
+            MANIFEST="${VERSION_DIR}/manifest.json"
+
+            if [ ! -f "$MANIFEST" ]; then
+              echo "  No manifest.json in $VERSION_DIR, skipping"
+              continue
+            fi
+
+            # Rewrite manifest s3_keys to use our CI stream name, then upload
+            python3 -c "
+          import json, sys
+          stream = '${STREAM_NAME}'
+          m = json.load(open('${MANIFEST}'))
+          m['name'] = stream
+          for c in m['chunks']:
+              fname = c['s3_key'].rsplit('/', 1)[-1]
+              c['s3_key'] = f'{stream}/{fname}'
+          json.dump(m, sys.stdout)
+          " > /tmp/compat-manifest.json
+            aws s3 cp /tmp/compat-manifest.json \
+              "s3://${S3DUCT_TEST_BUCKET}/${STREAM_NAME}/.manifest.json"
+
+            # Upload chunks
+            for CHUNK in "${VERSION_DIR}"/chunks/*; do
+              [ -f "$CHUNK" ] || continue
+              CHUNK_NAME=$(basename "$CHUNK")
+              aws s3 cp "$CHUNK" \
+                "s3://${S3DUCT_TEST_BUCKET}/${STREAM_NAME}/${CHUNK_NAME}"
+            done
+
+            # Download with current tool and verify
+            EXPECTED_HASH=$(cat "${VERSION_DIR}/expected_sha256")
+            s3duct get \
+              --bucket "${S3DUCT_TEST_BUCKET}" \
+              --name "${STREAM_NAME}" \
+              > /tmp/compat-restored.bin
+
+            ACTUAL_HASH=$(sha256sum /tmp/compat-restored.bin | cut -d' ' -f1)
+            if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+              echo "  COMPAT FAIL ($VERSION): expected=$EXPECTED_HASH actual=$ACTUAL_HASH"
+              exit 1
+            fi
+            echo "  $VERSION OK"
+            rm -f /tmp/compat-restored.bin /tmp/compat-manifest.json
+          done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-compat-" --recursive 2>/dev/null || true

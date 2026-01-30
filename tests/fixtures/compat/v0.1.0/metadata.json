@@ -1,0 +1,8 @@
+{
+  "tool_version": "0.1.0",
+  "encrypted": false,
+  "chunk_size": 64,
+  "chunk_count": 3,
+  "total_bytes": 168,
+  "description": "Basic unencrypted fixture for backward compat testing"
+}
