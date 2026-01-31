@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,7 @@ version = "0.3.0"
 description = "Chunked, resumable, encrypted pipe to S3-compatible object storage"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Elastic-2.0"}
+license = "Elastic-2.0"
 authors = [
     {name = "Site Reliability Enby"},
 ]
@@ -21,7 +21,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
     "Operating System :: POSIX",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
@@ -51,3 +50,6 @@ dev = [
     "moto[s3]>=4.0",
     "pytest-asyncio>=0.21",
 ]
+
+[tool.setuptools.packages.find]
+include = ["s3duct*"]
