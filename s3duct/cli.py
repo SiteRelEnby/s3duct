@@ -61,10 +61,13 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--buffer-chunks", default=None, type=int, help="Max buffered chunks in scratch (default: auto).")
 @click.option("--strict-resume/--no-strict-resume", default=True, help="Fail if stdin ends before all resume-log chunks are re-verified (default: on).")
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--upload-workers", default="auto", help="Parallel upload threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
+@click.option("--min-upload-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
+@click.option("--max-upload-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifest,
         tag, storage_class, region, prefix, endpoint_url, diskspace_limit, buffer_chunks,
-        strict_resume, retries, summary):
+        strict_resume, retries, upload_workers, min_upload_workers, max_upload_workers, summary):
     """Upload a stream from stdin to S3."""
     from s3duct.encryption import parse_key
     from s3duct.uploader import run_put
@@ -120,6 +123,26 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
+    # Parse upload_workers: "auto" or an integer
+    parsed_workers: int | str = upload_workers
+    if upload_workers != "auto":
+        try:
+            parsed_workers = int(upload_workers)
+            if parsed_workers < 1:
+                raise click.ClickException("--upload-workers must be >= 1")
+        except ValueError:
+            raise click.ClickException(
+                f"--upload-workers must be 'auto' or a positive integer, got: {upload_workers!r}"
+            )
+
+    if min_upload_workers is not None and upload_workers != "auto":
+        raise click.ClickException("--min-upload-workers only applies when --upload-workers is 'auto'")
+    if max_upload_workers is not None and upload_workers != "auto":
+        raise click.ClickException("--max-upload-workers only applies when --upload-workers is 'auto'")
+    if (min_upload_workers is not None and max_upload_workers is not None
+            and min_upload_workers > max_upload_workers):
+        raise click.ClickException("--min-upload-workers must be <= --max-upload-workers")
+
     run_put(
         backend=backend,
         name=name,
@@ -135,6 +158,9 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
         tags=tags or None,
         strict_resume=strict_resume,
         summary=summary,
+        upload_workers=parsed_workers,
+        min_upload_workers=min_upload_workers,
+        max_upload_workers=max_upload_workers,
     )
 
 

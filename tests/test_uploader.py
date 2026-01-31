@@ -270,3 +270,128 @@ def test_run_put_regular_file_size_check(upload_env, tmp_path, capsys):
     # Should NOT warn when sizes match
     captured = capsys.readouterr()
     assert "WARNING" not in captured.err or "regular file" not in captured.err
+
+
+# --- Parallel upload tests ---
+
+
+def test_run_put_parallel_basic(upload_env):
+    """Upload 7 chunks with workers=4, verify manifest is correct."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"p" * (CHUNK_SIZE * 7)
+    _mock_stdin(mp, data)
+
+    run_put(backend, "par-basic", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, upload_workers=4)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="par-basic/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.chunk_count == 7
+    assert manifest.total_bytes == len(data)
+    assert manifest.final_chain  # non-empty
+
+    # Verify all chunks present and correct
+    for i in range(7):
+        key = f"par-basic/chunk-{i:06d}"
+        resp = client.get_object(Bucket="test-bucket", Key=key)
+        chunk_data = resp["Body"].read()
+        assert chunk_data == data[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
+
+
+def test_run_put_parallel_ordering(upload_env):
+    """Verify resume log entries are in strict order with parallel workers."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"o" * (CHUNK_SIZE * 5 + 20)
+    _mock_stdin(mp, data)
+
+    run_put(backend, "par-order", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, upload_workers=4)
+
+    # Check resume log was uploaded in order
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="par-order/.resume.jsonl")["Body"].read()
+    lines = [l for l in raw.decode().strip().split("\n") if l]
+    indices = [json.loads(l)["chunk"] for l in lines]
+    assert indices == list(range(6))
+
+
+def test_run_put_workers_1_sequential(upload_env):
+    """workers=1 matches expected output (sequential behavior)."""
+    import hashlib
+    backend, client, scratch, session, mp = upload_env
+    data = b"sequential test data!" * 5
+    _mock_stdin(mp, data)
+
+    run_put(backend, "seq", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, upload_workers=1)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="seq/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.stream_sha256 == hashlib.sha256(data).hexdigest()
+    assert manifest.chunk_count > 0
+
+
+def test_run_put_parallel_encryption(upload_env):
+    """AES + workers=4 produces correct encrypted upload."""
+    import os
+    backend, client, scratch, session, mp = upload_env
+    data = b"encrypt parallel" * 10
+    aes_key = os.urandom(32)
+    _mock_stdin(mp, data)
+
+    run_put(backend, "par-aes", chunk_size=CHUNK_SIZE,
+            encrypt=True, encryption_method="aes-256-gcm",
+            aes_key=aes_key, scratch_dir=scratch, upload_workers=4)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="par-aes/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.encrypted is True
+    assert manifest.total_bytes == len(data)
+
+    # Verify chunk is encrypted
+    chunk0 = client.get_object(
+        Bucket="test-bucket", Key="par-aes/chunk-000000"
+    )["Body"].read()
+    assert chunk0 != data[:CHUNK_SIZE]
+
+
+def test_run_put_parallel_cleanup(upload_env):
+    """Scratch dir empty after parallel upload."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"c" * (CHUNK_SIZE * 5 + 10)
+    _mock_stdin(mp, data)
+
+    run_put(backend, "par-clean", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, upload_workers=4)
+
+    remaining = list(scratch.iterdir())
+    assert len(remaining) == 0
+
+
+def test_run_put_parallel_failure(upload_env):
+    """Inject upload failure, verify clean abort and consistent resume log."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"f" * (CHUNK_SIZE * 5)
+    _mock_stdin(mp, data)
+
+    call_count = 0
+    original_upload = backend.upload
+
+    def failing_upload(key, path, storage_class=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 3:
+            raise RuntimeError("Simulated non-retryable failure")
+        return original_upload(key, path, storage_class)
+
+    backend.upload = failing_upload
+    with pytest.raises(RuntimeError, match="non-retryable"):
+        run_put(backend, "par-fail", chunk_size=CHUNK_SIZE,
+                encrypt=False, scratch_dir=scratch, upload_workers=2)
+
+    # Scratch should be cleaned up even after failure
+    remaining = list(scratch.iterdir())
+    assert len(remaining) == 0

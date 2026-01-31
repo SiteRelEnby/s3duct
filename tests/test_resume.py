@@ -132,3 +132,94 @@ def test_resume_log_slash_in_name(session_dir):
     log.append(e0)
     assert "__" in log.path.name
     assert log.last_chunk_index == 0
+
+
+def test_resume_log_out_of_order_entries(session_dir):
+    """Log with entries 0,1,2,4,5 — contiguous_prefix returns 2."""
+    e0 = _make_entry(0, b"d0", None)
+    e1 = _make_entry(1, b"d1", bytes.fromhex(e0.chain))
+    e2 = _make_entry(2, b"d2", bytes.fromhex(e1.chain))
+    # Skip chunk 3
+    e3 = _make_entry(3, b"d3", bytes.fromhex(e2.chain))
+    e4 = _make_entry(4, b"d4", bytes.fromhex(e3.chain))
+
+    log = ResumeLog("test-gap")
+    log.append(e0)
+    log.append(e1)
+    log.append(e2)
+    # Write entries 4 and 5 (with chunk indices 4 and 5, skipping 3)
+    # We need to manually write entries with gap
+    log._entries.append(ResumeEntry(
+        chunk=4, size=2, sha256=e4.sha256, sha3_256=e4.sha3_256,
+        chain=e4.chain, s3_key="k", etag="et", ts="ts",
+    ))
+    log._entries.append(ResumeEntry(
+        chunk=5, size=2,
+        sha256=hashlib.sha256(b"d5").hexdigest(),
+        sha3_256=hashlib.sha3_256(b"d5").hexdigest(),
+        chain="fakechainvalue",
+        s3_key="k", etag="et", ts="ts",
+    ))
+
+    assert log.contiguous_prefix() == 2
+
+
+def test_resume_log_gap_warning(session_dir, capsys):
+    """Verify warning emitted when gap detected in resume log."""
+    e0 = _make_entry(0, b"d0", None)
+    e1 = _make_entry(1, b"d1", bytes.fromhex(e0.chain))
+
+    log = ResumeLog("test-gap-warn")
+    log.append(e0)
+    log.append(e1)
+    # Add entry with chunk=3, skipping chunk=2
+    log._entries.append(ResumeEntry(
+        chunk=3, size=2,
+        sha256=hashlib.sha256(b"d3").hexdigest(),
+        sha3_256=hashlib.sha3_256(b"d3").hexdigest(),
+        chain="fakechainvalue",
+        s3_key="k", etag="et", ts="ts",
+    ))
+
+    result = log.contiguous_prefix()
+    assert result == 1
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "gaps" in captured.err
+    assert "missing chunks: 2" in captured.err
+    assert "discarded" in captured.err
+
+
+def test_resume_log_verify_chain_rejects_gap(session_dir):
+    """verify_chain() fails on a gapped log (chunk index != position)."""
+    e0 = _make_entry(0, b"d0", None)
+    e1 = _make_entry(1, b"d1", bytes.fromhex(e0.chain))
+
+    log = ResumeLog("test-chain-gap")
+    log.append(e0)
+    log.append(e1)
+    # Inject entry with chunk=3, skipping chunk=2
+    log._entries.append(ResumeEntry(
+        chunk=3, size=2,
+        sha256=hashlib.sha256(b"d3").hexdigest(),
+        sha3_256=hashlib.sha3_256(b"d3").hexdigest(),
+        chain="fakechainvalue",
+        s3_key="k", etag="et", ts="ts",
+    ))
+
+    assert log.verify_chain() is False
+
+
+def test_resume_log_verify_chain_rejects_out_of_order(session_dir):
+    """verify_chain() fails if entries are not in sequential order."""
+    e0 = _make_entry(0, b"d0", None)
+    e1 = _make_entry(1, b"d1", bytes.fromhex(e0.chain))
+    e2 = _make_entry(2, b"d2", bytes.fromhex(e1.chain))
+
+    log = ResumeLog("test-chain-ooo")
+    log.append(e0)
+    log.append(e2)  # skip e1, append e2 — out of order
+    log.append(e1)
+
+    assert log.verify_chain() is False

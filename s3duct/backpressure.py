@@ -15,6 +15,7 @@ class BackpressureConfig:
     scratch_dir: Path
     max_buffer_chunks: int | None = None  # None = auto
     diskspace_limit: int | None = None    # explicit byte limit, or None
+    min_buffer_chunks: int = 2            # floor for parallel uploads
 
     def __post_init__(self) -> None:
         if self.diskspace_limit is not None and self.diskspace_limit < self.chunk_size:
@@ -50,6 +51,7 @@ class BackpressureMonitor:
             buf = compute_adaptive_buffer(
                 self._config.chunk_size, self._config.scratch_dir
             )
+        buf = max(buf, self._config.min_buffer_chunks)
         return buf * self._config.chunk_size
 
     @property
@@ -73,7 +75,8 @@ class BackpressureMonitor:
         usage = self.scratch_usage()
         if usage + self._config.chunk_size > self._effective_limit:
             return False
-        if self.free_disk_space() < self._config.chunk_size + _DISK_SAFETY_MARGIN:
+        safety = max(_DISK_SAFETY_MARGIN, int(1.5 * self._config.chunk_size))
+        if self.free_disk_space() < self._config.chunk_size + safety:
             return False
         return True
 

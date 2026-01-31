@@ -1,6 +1,7 @@
 """Resume log management with signature chain verification."""
 
 import json
+import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -55,15 +56,52 @@ class ResumeLog:
 
     @property
     def last_chunk_index(self) -> int:
-        """Index of last completed chunk, or -1 if none."""
+        """Index of the last chunk in the contiguous prefix, or -1 if none."""
+        return self.contiguous_prefix()
+
+    def contiguous_prefix(self) -> int:
+        """Find highest N where chunks 0..N are all present.
+
+        Returns -1 if there are no entries or chunk 0 is missing.
+        Emits a warning to stderr if gaps or ordering issues are detected.
+        """
         if not self._entries:
             return -1
-        return self._entries[-1].chunk
+        present = {e.chunk for e in self._entries}
+        if 0 not in present:
+            return -1
+        # Check for out-of-order entries
+        indices = [e.chunk for e in self._entries]
+        if indices != sorted(indices):
+            print(
+                "WARNING: Resume log entries are not in order. "
+                "Log may be corrupt; chain verification will fail.",
+                file=sys.stderr,
+            )
+        n = 0
+        while (n + 1) in present:
+            n += 1
+        max_chunk = max(present)
+        if n < max_chunk:
+            missing = sorted(set(range(n + 1, max_chunk + 1)) - present)
+            print(
+                f"WARNING: Resume log has gaps (missing chunks: "
+                f"{', '.join(str(m) for m in missing)}). "
+                f"Chain verification will fail; log will be discarded.",
+                file=sys.stderr,
+            )
+        return n
 
     def verify_chain(self) -> bool:
-        """Verify the full signature chain of all entries."""
+        """Verify the full signature chain of all entries.
+
+        Entries must be in strict sequential order (chunk 0, 1, 2, ...).
+        Out-of-order or gapped logs will fail verification.
+        """
         prev_chain: bytes | None = None
-        for entry in self._entries:
+        for i, entry in enumerate(self._entries):
+            if entry.chunk != i:
+                return False
             expected = compute_chain(entry.dual_hash, prev_chain)
             if expected != entry.chain:
                 return False

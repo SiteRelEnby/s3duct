@@ -87,7 +87,8 @@ def test_wait_for_space_unblocks(tmp_path):
     """wait_for_space should unblock when a file is deleted."""
     blocker = tmp_path / "chunk-000000"
     blocker.write_bytes(b"x" * 64)
-    cfg = BackpressureConfig(chunk_size=64, scratch_dir=tmp_path, max_buffer_chunks=1)
+    cfg = BackpressureConfig(chunk_size=64, scratch_dir=tmp_path, max_buffer_chunks=1,
+                             min_buffer_chunks=1)
     mon = BackpressureMonitor(cfg)
 
     unblocked = threading.Event()
