@@ -10,8 +10,11 @@ from moto import mock_aws
 
 from s3duct.backends.s3 import S3Backend
 from s3duct.downloader import run_get, run_list, run_verify
+from s3duct.encryption import age_available
 from s3duct.integrity import compute_chain, DualHash
 from s3duct.manifest import ChunkRecord, Manifest
+
+skip_no_age = pytest.mark.skipif(not age_available(), reason="age CLI not installed")
 
 
 CHUNK_SIZE = 64
@@ -441,3 +444,125 @@ def test_run_verify_encrypted_manifest_no_credentials(download_env):
     # Verify without any key should mention encryption
     with pytest.raises(Exception, match="[Ee]ncrypted|key|identity"):
         run_verify(backend, "no-creds")
+
+
+@skip_no_age
+def test_run_get_age_roundtrip(download_env):
+    """Full upload+download roundtrip with age encryption."""
+    import subprocess
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"age roundtrip test data" * 5
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    identity = scratch.parent / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True,
+                   capture_output=True)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "age-rt", chunk_size=CHUNK_SIZE,
+        encrypt=True, encrypt_manifest=False,
+        encryption_method="age", age_identity=str(identity),
+        scratch_dir=scratch,
+    )
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(
+        backend, "age-rt", decrypt=True,
+        encryption_method="age", age_identity=str(identity),
+        scratch_dir=scratch,
+    )
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+@skip_no_age
+def test_run_get_age_encrypted_manifest_roundtrip(download_env):
+    """Upload with age + encrypted manifest, download with identity, verify data."""
+    import subprocess
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"age encrypted manifest roundtrip" * 4
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    identity = scratch.parent / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True,
+                   capture_output=True)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "age-enc-man-rt", chunk_size=CHUNK_SIZE,
+        encrypt=True, encrypt_manifest=True,
+        encryption_method="age", age_identity=str(identity),
+        scratch_dir=scratch,
+    )
+
+    # Manifest should be encrypted (not valid JSON)
+    import json as _json
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="age-enc-man-rt/.manifest.json")["Body"].read()
+    with pytest.raises((_json.JSONDecodeError, UnicodeDecodeError)):
+        _json.loads(raw)
+
+    # Download should auto-decrypt manifest and chunks
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(
+        backend, "age-enc-man-rt", decrypt=True,
+        encryption_method="age", age_identity=str(identity),
+        scratch_dir=scratch,
+    )
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+@skip_no_age
+def test_run_verify_age_encrypted_manifest(download_env):
+    """Verify with age-encrypted manifest should work with --age-identity."""
+    import subprocess
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"age verify test" * 3
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    identity = scratch.parent / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True,
+                   capture_output=True)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "age-verify", chunk_size=CHUNK_SIZE,
+        encrypt=True, encrypt_manifest=True,
+        encryption_method="age", age_identity=str(identity),
+        scratch_dir=scratch,
+    )
+
+    # Verify with identity should succeed (no exception)
+    run_verify(backend, "age-verify", age_identity=str(identity))

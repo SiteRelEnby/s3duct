@@ -9,12 +9,14 @@ import pytest
 from moto import mock_aws
 
 from s3duct.backends.s3 import S3Backend
+from s3duct.encryption import age_available
 from s3duct.manifest import Manifest
 from s3duct.resume import ResumeLog
 from s3duct.uploader import run_put
 
 
 CHUNK_SIZE = 64
+skip_no_age = pytest.mark.skipif(not age_available(), reason="age CLI not installed")
 
 
 @pytest.fixture
@@ -447,3 +449,74 @@ def test_run_put_encrypt_manifest_opt_out(upload_env):
     manifest = Manifest.from_json(raw)
     assert manifest.encrypted is True
     assert manifest.encrypted_manifest is False
+
+
+# --- Age encryption tests ---
+
+
+@skip_no_age
+def test_run_put_age_encrypted(upload_env, tmp_path):
+    """Test upload with age encryption."""
+    import subprocess
+    from s3duct.encryption import get_recipient_from_identity
+
+    backend, client, scratch, session, mp = upload_env
+    data = b"age encrypt me" * 5
+    _mock_stdin(mp, data)
+
+    identity = tmp_path / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True,
+                   capture_output=True)
+
+    run_put(backend, "age-stream", chunk_size=CHUNK_SIZE,
+            encrypt=True, encrypt_manifest=False,
+            encryption_method="age", age_identity=str(identity),
+            scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="age-stream/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.encrypted is True
+    assert manifest.encryption_method == "age"
+    assert manifest.chunk_count > 0
+    assert manifest.total_bytes == len(data)
+
+    # Chunks should be encrypted (not plaintext)
+    chunk_data = client.get_object(
+        Bucket="test-bucket", Key="age-stream/chunk-000000"
+    )["Body"].read()
+    assert chunk_data != data[:CHUNK_SIZE]
+
+
+@skip_no_age
+def test_run_put_age_encrypted_manifest(upload_env, tmp_path):
+    """Test upload with age encryption and encrypted manifest."""
+    import subprocess
+
+    backend, client, scratch, session, mp = upload_env
+    data = b"age encrypted manifest" * 3
+    _mock_stdin(mp, data)
+
+    identity = tmp_path / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True,
+                   capture_output=True)
+
+    run_put(backend, "age-enc-man", chunk_size=CHUNK_SIZE,
+            encrypt=True, encrypt_manifest=True,
+            encryption_method="age", age_identity=str(identity),
+            scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="age-enc-man/.manifest.json")["Body"].read()
+    # Manifest should NOT be valid JSON (it's age-encrypted)
+    with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
+        json.loads(raw)
+
+    # Decrypting should yield valid manifest
+    from s3duct.encryption import age_decrypt_manifest
+    decrypted = age_decrypt_manifest(raw, str(identity))
+    manifest = Manifest.from_json(decrypted)
+    assert manifest.encrypted is True
+    assert manifest.encrypted_manifest is True
+    assert manifest.encryption_method == "age"
+    assert manifest.total_bytes == len(data)
