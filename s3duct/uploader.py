@@ -250,6 +250,9 @@ def run_put(
     max_upload_workers: int | None = None,
 ) -> None:
     """Execute the full put pipeline."""
+    # Verify credentials and bucket access before reading any stdin
+    backend.preflight_check()
+
     if scratch_dir is None:
         scratch_dir = SCRATCH_DIR
     scratch_dir.mkdir(parents=True, exist_ok=True)

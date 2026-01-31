@@ -52,6 +52,11 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
+    def preflight_check(self) -> None:
+        """Verify credentials and bucket access. Raises on failure."""
+        ...
+
+    @abstractmethod
     def initiate_restore(self, key: str, days: int, tier: str) -> None:
         """Request restore of a Glacier/GDA object."""
         ...

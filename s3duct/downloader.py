@@ -71,6 +71,8 @@ def run_get(
     summary: str = "text",  # "text", "json", or "none"
 ) -> None:
     """Execute the full get pipeline."""
+    backend.preflight_check()
+
     if scratch_dir is None:
         scratch_dir = SCRATCH_DIR
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -231,6 +233,8 @@ def run_verify(
     summary: str = "text",  # "text", "json", or "none"
 ) -> None:
     """Verify integrity of a stored stream without downloading chunk data."""
+    backend.preflight_check()
+
     manifest_key = Manifest.s3_key(name)
     raw = backend.download_bytes(manifest_key)
 

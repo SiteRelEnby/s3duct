@@ -9,6 +9,8 @@ from botocore.exceptions import (
     ConnectionClosedError,
     ConnectTimeoutError,
     EndpointConnectionError,
+    NoCredentialsError,
+    PartialCredentialsError,
     ReadTimeoutError,
 )
 
@@ -34,6 +36,29 @@ class S3Backend(StorageBackend):
         self._retry_max_delay = retry_max_delay
         session = boto3.Session(region_name=region)
         self._client = session.client("s3", endpoint_url=endpoint_url)
+
+    def preflight_check(self) -> None:
+        try:
+            self._client.head_bucket(Bucket=self._bucket)
+        except NoCredentialsError:
+            raise RuntimeError(
+                "No AWS credentials found. Configure credentials via environment "
+                "variables, ~/.aws/credentials, IAM role, or SSO."
+            )
+        except PartialCredentialsError as e:
+            raise RuntimeError(f"Incomplete AWS credentials: {e}")
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            if code == "403":
+                raise RuntimeError(
+                    f"Access denied to bucket {self._bucket!r}. "
+                    "Check your IAM permissions."
+                )
+            elif code == "404":
+                raise RuntimeError(
+                    f"Bucket {self._bucket!r} does not exist."
+                )
+            raise
 
     def _full_key(self, key: str) -> str:
         return f"{self._prefix}{key}"
