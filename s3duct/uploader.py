@@ -497,9 +497,13 @@ def run_put(
     # Upload manifest (always STANDARD class so it's immediately accessible)
     manifest_key = Manifest.s3_key(name)
     manifest_bytes = manifest.to_json().encode()
-    if encrypt_manifest and encryption_method == "aes-256-gcm" and aes_key:
-        from s3duct.encryption import aes_encrypt_manifest
-        manifest_bytes = aes_encrypt_manifest(manifest_bytes, aes_key)
+    if encrypt_manifest:
+        if encryption_method == "aes-256-gcm" and aes_key:
+            from s3duct.encryption import aes_encrypt_manifest
+            manifest_bytes = aes_encrypt_manifest(manifest_bytes, aes_key)
+        elif encryption_method == "age" and recipient:
+            from s3duct.encryption import age_encrypt_manifest
+            manifest_bytes = age_encrypt_manifest(manifest_bytes, recipient)
     backend.upload_bytes(manifest_key, manifest_bytes, "STANDARD")
     click.echo(f"Manifest uploaded to {manifest_key}", err=True)
 

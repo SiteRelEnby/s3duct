@@ -51,7 +51,7 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...).")
 @click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file.")
 @click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption even if --key or --age-identity set.")
-@click.option("--encrypt-manifest", is_flag=True, default=False, help="Encrypt manifest with same key as chunks.")
+@click.option("--encrypt-manifest/--no-encrypt-manifest", default=None, help="Encrypt manifest (default: on when encryption is active). Use --no-encrypt-manifest to keep manifest as readable JSON.")
 @click.option("--tag", multiple=True, help="Custom metadata tag (key=value, repeatable).")
 @click.option("--storage-class", default=DEFAULT_STORAGE_CLASS, help="S3 storage class. Default: STANDARD.")
 @click.option("--region", default=None, help="AWS region.")
@@ -103,9 +103,13 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
             import time
             time.sleep(10)
 
-    if encrypt_manifest:
-        if not (encrypt and encryption_method == "aes-256-gcm"):
-            raise click.ClickException("--encrypt-manifest requires AES encryption (--key).")
+    # Resolve encrypt_manifest default: on when encryption is active
+    if encrypt_manifest is None:
+        encrypt_manifest = encrypt
+    if encrypt_manifest and not encrypt:
+        raise click.ClickException(
+            "--encrypt-manifest requires encryption (--key or --age-identity)."
+        )
 
     # Parse tags
     tags = {}
@@ -224,24 +228,28 @@ def list_cmd(bucket, prefix, region, endpoint_url):
 @main.command()
 @click.option("--bucket", required=True, help="S3 bucket name.")
 @click.option("--name", required=True, help="Stream name to verify.")
-@click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...). Required if manifest is encrypted.")
+@click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...). Required if manifest is encrypted with AES.")
+@click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file. Required if manifest is encrypted with age.")
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
-def verify(bucket, name, key, region, prefix, endpoint_url, retries, summary):
+def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retries, summary):
     """Verify integrity of a stored stream."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_verify
 
     validate_name(name)
 
+    if key and age_identity:
+        raise click.ClickException("--key and --age-identity are mutually exclusive.")
+
     aes_key = parse_key(key) if key else None
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
-    run_verify(backend, name, aes_key=aes_key, summary=summary)
+    run_verify(backend, name, aes_key=aes_key, age_identity=age_identity, summary=summary)
 
 
 if __name__ == "__main__":

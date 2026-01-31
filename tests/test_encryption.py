@@ -6,6 +6,7 @@ import pytest
 
 from s3duct.encryption import (
     age_available, age_encrypt_file, age_decrypt_file, get_recipient_from_identity,
+    age_encrypt_manifest, age_decrypt_manifest,
     aes_encrypt_file, aes_decrypt_file, parse_key,
 )
 
@@ -95,6 +96,23 @@ def test_age_decrypt_file_mocked_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("s3duct.encryption.subprocess.run", mock_run)
     with pytest.raises(RuntimeError, match="age decrypt failed"):
         age_decrypt_file(src, dest, "/fake/identity")
+
+
+@skip_no_age
+def test_age_encrypt_decrypt_manifest(tmp_path):
+    """Roundtrip manifest encryption/decryption with age via stdin/stdout."""
+    identity = tmp_path / "identity.txt"
+    subprocess.run(["age-keygen", "-o", str(identity)], check=True,
+                   capture_output=True)
+    recipient = get_recipient_from_identity(str(identity))
+
+    plaintext = b'{"version": 1, "name": "test", "chunks": []}'
+    encrypted = age_encrypt_manifest(plaintext, recipient)
+    assert encrypted != plaintext
+    assert len(encrypted) > 0
+
+    decrypted = age_decrypt_manifest(encrypted, str(identity))
+    assert decrypted == plaintext
 
 
 # ---------------------------------------------------------------------------

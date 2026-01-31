@@ -13,6 +13,52 @@ from s3duct.integrity import hash_file, compute_chain, DualHash
 from s3duct.manifest import Manifest
 
 
+def _decrypt_manifest(
+    raw: bytes,
+    aes_key: bytes | None = None,
+    age_identity: str | None = None,
+) -> Manifest:
+    """Try to parse manifest, decrypting if necessary.
+
+    Tries JSON first, then AES decryption, then age decryption.
+    Raises click.ClickException on failure.
+    """
+    try:
+        return Manifest.from_json(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+
+    if aes_key:
+        from s3duct.encryption import aes_decrypt_manifest
+        try:
+            decrypted = aes_decrypt_manifest(raw, aes_key)
+            manifest = Manifest.from_json(decrypted)
+            click.echo("Manifest decrypted successfully.", err=True)
+            return manifest
+        except Exception:
+            pass
+
+    if age_identity:
+        from s3duct.encryption import age_decrypt_manifest
+        try:
+            decrypted = age_decrypt_manifest(raw, age_identity)
+            manifest = Manifest.from_json(decrypted)
+            click.echo("Manifest decrypted successfully.", err=True)
+            return manifest
+        except Exception:
+            pass
+
+    if aes_key or age_identity:
+        raise click.ClickException(
+            "Manifest appears encrypted but could not be decrypted. "
+            "Check your key/identity."
+        )
+    raise click.ClickException(
+        "Manifest is not valid JSON — it may be encrypted. "
+        "Provide --key or --age-identity to decrypt."
+    )
+
+
 def run_get(
     backend: StorageBackend,
     name: str,
@@ -33,27 +79,8 @@ def run_get(
     click.echo(f"Downloading manifest...", err=True)
     raw = backend.download_bytes(manifest_key)
 
-    # Attempt decryption of manifest if we have an AES key
-    # (encrypted manifest validates key early before downloading chunks)
-    try:
-        manifest = Manifest.from_json(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        if aes_key:
-            from s3duct.encryption import aes_decrypt_manifest
-            try:
-                raw = aes_decrypt_manifest(raw, aes_key)
-                manifest = Manifest.from_json(raw)
-                click.echo("Manifest decrypted successfully.", err=True)
-            except Exception:
-                raise click.ClickException(
-                    "Manifest appears encrypted but could not be decrypted. "
-                    "Check your key."
-                )
-        else:
-            raise click.ClickException(
-                "Manifest is not valid JSON — it may be encrypted. "
-                "Provide --key to decrypt."
-            )
+    # Decrypt manifest if needed (validates key/identity early)
+    manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
     if manifest.encrypted and not decrypt:
         method = manifest.encryption_method or "age"
@@ -198,31 +225,14 @@ def run_verify(
     backend: StorageBackend,
     name: str,
     aes_key: bytes | None = None,
+    age_identity: str | None = None,
     summary: str = "text",  # "text", "json", or "none"
 ) -> None:
     """Verify integrity of a stored stream without downloading chunk data."""
     manifest_key = Manifest.s3_key(name)
     raw = backend.download_bytes(manifest_key)
 
-    try:
-        manifest = Manifest.from_json(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        if aes_key:
-            from s3duct.encryption import aes_decrypt_manifest
-            try:
-                raw = aes_decrypt_manifest(raw, aes_key)
-                manifest = Manifest.from_json(raw)
-                click.echo("Manifest decrypted successfully.", err=True)
-            except Exception:
-                raise click.ClickException(
-                    "Manifest appears encrypted but could not be decrypted. "
-                    "Check your key."
-                )
-        else:
-            raise click.ClickException(
-                "Manifest is not valid JSON — it may be encrypted. "
-                "Provide --key to decrypt."
-            )
+    manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
     click.echo(f"Verifying {manifest.chunk_count} chunks...", err=True)
     errors = 0

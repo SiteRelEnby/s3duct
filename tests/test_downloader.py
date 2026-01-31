@@ -367,3 +367,77 @@ def test_run_get_no_decrypt_json_summary(download_env, capsys):
     assert report["chain_verified"] is False
     assert report["raw_mode"] is True
     assert report["status"] == "complete"
+
+
+def test_run_get_encrypted_manifest_aes_roundtrip(download_env):
+    """Upload with encrypted manifest, download with key, verify data matches."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"encrypted manifest roundtrip" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "enc-man-rt", chunk_size=CHUNK_SIZE,
+        encrypt=True, encrypt_manifest=True,
+        encryption_method="aes-256-gcm", aes_key=aes_key,
+        scratch_dir=scratch,
+    )
+
+    # Manifest should NOT be valid JSON
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="enc-man-rt/.manifest.json")["Body"].read()
+    import json as _json
+    with pytest.raises((_json.JSONDecodeError, UnicodeDecodeError)):
+        _json.loads(raw)
+
+    # Download should auto-detect and decrypt manifest
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(
+        backend, "enc-man-rt", decrypt=True,
+        encryption_method="aes-256-gcm", aes_key=aes_key,
+        scratch_dir=scratch,
+    )
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+def test_run_verify_encrypted_manifest_no_credentials(download_env):
+    """Verify without any credentials on encrypted manifest should fail with helpful message."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"no creds test" * 3
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "no-creds", chunk_size=CHUNK_SIZE,
+        encrypt=True, encrypt_manifest=True,
+        encryption_method="aes-256-gcm", aes_key=aes_key,
+        scratch_dir=scratch,
+    )
+
+    # Verify without any key should mention encryption
+    with pytest.raises(Exception, match="[Ee]ncrypted|key|identity"):
+        run_verify(backend, "no-creds")

@@ -188,3 +188,31 @@ def test_cli_put_encrypt_manifest_requires_key():
         "put", "--bucket", "b", "--name", "n", "--encrypt-manifest",
     ], input="")
     assert result.exit_code != 0
+
+
+def test_cli_put_no_encrypt_manifest_flag():
+    """--no-encrypt-manifest should be accepted."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert "--no-encrypt-manifest" in result.output
+
+
+def test_cli_verify_age_identity_option():
+    """verify command should accept --age-identity."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["verify", "--help"])
+    assert "--age-identity" in result.output
+
+
+def test_cli_verify_key_and_age_mutual_exclusion(tmp_path):
+    """verify --key + --age-identity should error."""
+    identity = tmp_path / "id.txt"
+    identity.write_text("AGE-SECRET-KEY-1FAKE")
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "verify", "--bucket", "b", "--name", "n",
+        "--key", "hex:" + "aa" * 32,
+        "--age-identity", str(identity),
+    ])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output

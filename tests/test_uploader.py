@@ -395,3 +395,55 @@ def test_run_put_parallel_failure(upload_env):
     # Scratch should be cleaned up even after failure
     remaining = list(scratch.iterdir())
     assert len(remaining) == 0
+
+
+# --- Manifest encryption tests ---
+
+
+def test_run_put_encrypt_manifest_default_on(upload_env):
+    """When encrypt_manifest=True, manifest should NOT be valid JSON."""
+    import os
+    backend, client, scratch, session, mp = upload_env
+    data = b"auto-encrypt manifest" * 3
+    _mock_stdin(mp, data)
+    aes_key = os.urandom(32)
+
+    run_put(backend, "enc-man-auto", chunk_size=CHUNK_SIZE,
+            encrypt=True, encrypt_manifest=True,
+            encryption_method="aes-256-gcm", aes_key=aes_key,
+            scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="enc-man-auto/.manifest.json")["Body"].read()
+    # Encrypted manifest should NOT be valid JSON
+    with pytest.raises((json.JSONDecodeError, UnicodeDecodeError)):
+        json.loads(raw)
+
+    # But decrypting it should yield valid manifest
+    from s3duct.encryption import aes_decrypt_manifest
+    decrypted = aes_decrypt_manifest(raw, aes_key)
+    manifest = Manifest.from_json(decrypted)
+    assert manifest.encrypted is True
+    assert manifest.encrypted_manifest is True
+    assert manifest.total_bytes == len(data)
+
+
+def test_run_put_encrypt_manifest_opt_out(upload_env):
+    """When encrypt_manifest=False, manifest stays readable JSON even with encryption."""
+    import os
+    backend, client, scratch, session, mp = upload_env
+    data = b"readable manifest" * 3
+    _mock_stdin(mp, data)
+    aes_key = os.urandom(32)
+
+    run_put(backend, "enc-man-off", chunk_size=CHUNK_SIZE,
+            encrypt=True, encrypt_manifest=False,
+            encryption_method="aes-256-gcm", aes_key=aes_key,
+            scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="enc-man-off/.manifest.json")["Body"].read()
+    # Should be valid JSON (not encrypted)
+    manifest = Manifest.from_json(raw)
+    assert manifest.encrypted is True
+    assert manifest.encrypted_manifest is False

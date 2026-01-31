@@ -82,6 +82,34 @@ def aes_decrypt_manifest(data: bytes, key: bytes) -> bytes:
 # Age (asymmetric)
 # ---------------------------------------------------------------------------
 
+def age_encrypt_manifest(plaintext: bytes, recipient: str) -> bytes:
+    """Encrypt manifest bytes with age. Pipes via stdin/stdout."""
+    try:
+        result = subprocess.run(
+            ["age", "-r", recipient],
+            input=plaintext, capture_output=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("age not found. Install age: https://github.com/FiloSottile/age")
+    if result.returncode != 0:
+        raise RuntimeError(f"age encrypt failed: {result.stderr.decode().strip()}")
+    return result.stdout
+
+
+def age_decrypt_manifest(data: bytes, identity: str) -> bytes:
+    """Decrypt manifest bytes with age. Pipes via stdin/stdout."""
+    try:
+        result = subprocess.run(
+            ["age", "-d", "-i", identity],
+            input=data, capture_output=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("age not found. Install age: https://github.com/FiloSottile/age")
+    if result.returncode != 0:
+        raise RuntimeError(f"age decrypt failed: {result.stderr.decode().strip()}")
+    return result.stdout
+
+
 def age_available() -> bool:
     """Check if the age CLI is installed."""
     return shutil.which("age") is not None
