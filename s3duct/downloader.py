@@ -6,6 +6,7 @@ from pathlib import Path
 
 import click
 
+from s3duct import __version__
 from s3duct.backends.base import StorageBackend
 from s3duct.config import SCRATCH_DIR
 from s3duct.encryption import aes_decrypt_file, age_decrypt_file
@@ -173,6 +174,7 @@ def run_get(
 
     if summary == "json":
         report = {
+            "version": __version__,
             "status": "complete",
             "stream": name,
             "chunks_downloaded": manifest.chunk_count,
@@ -255,6 +257,7 @@ def run_verify(
 
     if summary == "json":
         click.echo(json.dumps({
+            "version": __version__,
             "status": "fail" if errors else "ok",
             "stream": name,
             "chunks_total": manifest.chunk_count,

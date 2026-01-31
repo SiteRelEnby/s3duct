@@ -4,6 +4,7 @@ import sys
 
 import click
 
+from s3duct import __version__
 from s3duct.backends.s3 import S3Backend
 from s3duct.config import DEFAULT_CHUNK_SIZE, DEFAULT_STORAGE_CLASS, MAX_RETRY_ATTEMPTS
 
@@ -19,6 +20,7 @@ def parse_size(value: str) -> int:
 
 
 @click.group()
+@click.version_option(version=__version__, prog_name="s3duct")
 def main() -> None:
     """s3duct - Chunked, resumable, encrypted pipe to object storage."""
     pass

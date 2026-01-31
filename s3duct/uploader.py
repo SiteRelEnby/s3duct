@@ -14,6 +14,8 @@ from statistics import mean
 
 import click
 
+from s3duct import __version__
+
 from s3duct.backends.base import StorageBackend
 from s3duct.backpressure import BackpressureConfig, BackpressureMonitor
 from s3duct.chunker import ChunkInfo, chunk_stream, fast_forward_stream
@@ -529,6 +531,7 @@ def run_put(
 
     if summary == "json":
         click.echo(_json.dumps({
+            "version": __version__,
             "status": "complete",
             "stream": name,
             "chunks_uploaded": chunks_uploaded,
