@@ -1,5 +1,7 @@
 """CLI entry point for s3duct."""
 
+import sys
+
 import click
 
 from s3duct.backends.s3 import S3Backend
@@ -85,6 +87,18 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
         elif age_identity:
             encrypt = True
             encryption_method = "age"
+
+    # Warn on unencrypted upload
+    if not encrypt and not no_encrypt:
+        click.echo(
+            "WARNING: No encryption configured. Data will be uploaded in plaintext.\n"
+            "         Use --key or --age-identity to encrypt, or --no-encrypt to silence this warning.",
+            err=True,
+        )
+        if sys.stderr.isatty():
+            click.echo("         Proceeding in 10 seconds... (Ctrl+C to abort)", err=True)
+            import time
+            time.sleep(10)
 
     if encrypt_manifest:
         if not (encrypt and encryption_method == "aes-256-gcm"):
@@ -184,20 +198,24 @@ def list_cmd(bucket, prefix, region, endpoint_url):
 @main.command()
 @click.option("--bucket", required=True, help="S3 bucket name.")
 @click.option("--name", required=True, help="Stream name to verify.")
+@click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...). Required if manifest is encrypted.")
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
-def verify(bucket, name, region, prefix, endpoint_url, retries, summary):
+def verify(bucket, name, key, region, prefix, endpoint_url, retries, summary):
     """Verify integrity of a stored stream."""
+    from s3duct.encryption import parse_key
     from s3duct.downloader import run_verify
 
     validate_name(name)
 
+    aes_key = parse_key(key) if key else None
+
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
-    run_verify(backend, name, summary=summary)
+    run_verify(backend, name, aes_key=aes_key, summary=summary)
 
 
 if __name__ == "__main__":

@@ -79,7 +79,7 @@ pg_dump mydb | s3duct put --bucket mybucket --name db-backup \
 s3duct get --bucket mybucket --name mybackup > restored.tar.gz
 
 # AES-256-GCM
-s3duct get --bucket mybucket --name mybackup --key hex:... > restored.tar.gz
+s3duct get --bucket mybucket --name mybackup --key hex:... | zpool import
 
 # age
 s3duct get --bucket mybucket --name mybackup \
@@ -103,6 +103,18 @@ s3duct verify --bucket mybucket --name mybackup
 s3duct supports two encryption methods. Both encrypt each chunk client-side
 before upload. The manifest records which method was used, so `get`
 auto-detects the decryption path.
+
+Manifest encryption is currently only supported for AES-256; age will be supported
+in a later release.
+
+If the manifest is unencrypted, it exposes metadata only (not plaintext): stream
+name/prefix, chunk count, per-chunk sizes, hashes, ETags, timestamps, storage
+class, tags, and the encryption method/recipient. With read access to the bucket,
+many of these (object keys, sizes, storage class, timestamps, and ETags) are
+already inferable from object listings and HEADs, but the manifest makes it
+trivial to enumerate and correlate. This is usually low-risk but can leak file
+sizes, change cadence, and other patterns — use `--encrypt-manifest` if that
+matters.
 
 ### AES-256-GCM (symmetric)
 
@@ -131,12 +143,13 @@ s3duct put --bucket b --name n --key hex:... --encrypt-manifest
 ```
 
 Each chunk is encrypted with a random 96-bit nonce. A nonce collision
-under the same key becomes probable around 2^48 chunks (the [birthday
-bound](https://en.wikipedia.org/wiki/Birthday_bound)), which at the default 512MB chunk size is ~128 exabytes. Use a
-different key per stream to reset the bound. If you anticipate your use
-case exceeding the birthday bound within a single stream and reasonable
-block size, [age](#age-asymmetric) does not suffer from birthday bound issues. If symmetric
-is a hard requirement, please [open an issue](https://github.com/SiteRelEnby/s3duct/issues) and make a donation to [Trans Lifeline](https://translifeline.org/).
+under the same key (including cross-session key reuse) becomes probable
+around 2^48 chunks (the [birthday bound](https://en.wikipedia.org/wiki/Birthday_bound)), which at the default 512MB chunk
+size is ~128 exabytes. Use a different key per stream to reset the bound.
+If you anticipate your use case exceeding the birthday bound within a
+single stream and reasonable block size, [age](#age-asymmetric) does not suffer from birthday
+bound issues. If symmetric is a hard requirement, please [open an issue](https://github.com/SiteRelEnby/s3duct/issues) and
+make a donation to [Trans Lifeline](https://translifeline.org/).
 Plus we'd just be interested to hear about how well it hyperscales.
 
 ### age (asymmetric)
@@ -145,13 +158,17 @@ Uses [age](https://age-encryption.org/) for public-key encryption.
 Useful when the encryptor shouldn't hold the decryption key (e.g.,
 automated backups encrypting to an offline recovery key).
 
+age uses X25519 (classic) or ML-KEM-768+X25519 (PQ hybrid) to wrap a per-file
+key, with HKDF-SHA256 and ChaCha20-Poly1305. Payload encryption also uses
+HKDF-SHA256 and ChaCha20-Poly1305, with an HMAC-SHA256 header MAC.
+
 ```bash
 # Install age
 # macOS: brew install age
 # Linux: xbps-install age / apt install age / apk add age / pacman -S age / etc. - see https://age-encryption.org/
 
 # Generate a keypair
-age-keygen -o ~/.age/key.txt
+age-keygen -pq -o ~/.age/key.txt
 # Prints the public key (recipient): age1...
 
 # Upload (uses the keypair — extracts public key automatically)
@@ -166,30 +183,19 @@ s3duct get --bucket b --name n --age-identity ~/.age/key.txt > data.tar.gz
 age supports hybrid post-quantum keys (X25519 + ML-KEM-768) via the
 `-pq` flag. These protect against both classical and future quantum
 attacks. This is recommended if long-term confidentiality matters
-(e.g., encrypted archives that may sit in storage for years).
-
-```bash
-# Generate a post-quantum keypair
-age-keygen -pq -o ~/.age/pq-key.txt
-# Recipient starts with age1pq1... (~2000 chars, but lives in a file)
-
-# Usage is identical — s3duct doesn't need to know about -pq
-s3duct put --bucket b --name n --age-identity ~/.age/pq-key.txt
-s3duct get --bucket b --name n --age-identity ~/.age/pq-key.txt
-```
-
-Note: post-quantum recipients are ~2KB, which adds overhead to each
-encrypted chunk header. Negligible for real workloads (512MB chunks)
-but visible on tiny test files.
+(e.g., encrypted archives that may sit in storage for years), and is
+likely to become the default in a future release (note that -pq was
+already specified in the previous section - the only downside to
+using post-quantum keys is an overhead of ~2KB/block).
 
 ### Comparison
 
-| | AES-256-GCM | age | age -pq |
-|---|---|---|---|
-| Quantum resistant | Yes | No | Yes |
-| Key model | Symmetric | Asymmetric | Asymmetric |
-| External dependency | None | age CLI | age CLI |
-| Best for | Simple backups | Multi-party / offline keys | Long-term archives |
+| | AES-256-GCM | age |
+|---|---|---|
+| Quantum resistant | Yes | Yes, with `-pq` |
+| Key model | Symmetric | Asymmetric |
+| External dependency | None | age CLI |
+| Best for | Simple backups | Multi-party / offline keys |
 
 ### Storage Classes
 
@@ -327,10 +333,8 @@ it left off.
 
 **Edge case — truncated resume input:** if stdin ends before all
 previously-uploaded chunks are re-verified (e.g., the source process
-crashed or you piped a shorter stream), s3duct will warn but still
-complete the upload with whatever chunks exist. Use `--strict-resume`
-to make this a fatal error instead. `--no-strict-resume` is available
-to explicitly override if you've aliased strict mode on.
+crashed or you piped a shorter stream), s3duct will by default return
+an error. `--no-strict-resume` is available to disable this safety check.
 
 ### Shell pipefail
 

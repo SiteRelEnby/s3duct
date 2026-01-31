@@ -26,10 +26,12 @@ PREFIX="chaos-$$"
 CHUNK_SIZE="256K"
 AES_KEY="hex:$(python3 -c 'import os; print(os.urandom(32).hex())')"
 
-# Test data: ~5MB, enough for ~20 chunks at 256K
+# Test data: small for most tests; large for outage/backpressure
 DATA_FILE="/tmp/s3duct-chaos-input.bin"
+DATA_FILE_LARGE="/tmp/s3duct-chaos-input-large.bin"
 OUT_FILE="/tmp/s3duct-chaos-output.bin"
 DATA_SIZE=$((5 * 1024 * 1024))
+DATA_SIZE_LARGE=$((100 * 1024 * 1024))
 
 toxiproxy_api() {
   curl -sf "http://${TOXIPROXY_API}$@"
@@ -80,7 +82,7 @@ cleanup() {
   clear_toxics
   enable_proxy
   aws --endpoint-url "${MINIO_ENDPOINT}" s3 rm "s3://${BUCKET}/${PREFIX}/" --recursive 2>/dev/null || true
-  rm -f "${DATA_FILE}" "${OUT_FILE}"
+  rm -f "${DATA_FILE}" "${DATA_FILE_LARGE}" "${OUT_FILE}"
 }
 trap cleanup EXIT
 
@@ -112,6 +114,11 @@ echo "--- Generate test data (${DATA_SIZE} bytes) ---"
 dd if=/dev/urandom of="${DATA_FILE}" bs=1K count=$((DATA_SIZE / 1024)) 2>/dev/null
 EXPECTED=$(sha256sum "${DATA_FILE}" | cut -d' ' -f1)
 echo "Input SHA256: ${EXPECTED}"
+
+echo "--- Generate large test data (${DATA_SIZE_LARGE} bytes) ---"
+dd if=/dev/urandom of="${DATA_FILE_LARGE}" bs=1K count=$((DATA_SIZE_LARGE / 1024)) 2>/dev/null
+EXPECTED_LARGE=$(sha256sum "${DATA_FILE_LARGE}" | cut -d' ' -f1)
+echo "Large input SHA256: ${EXPECTED_LARGE}"
 
 # =========================================================================
 # Test 1: Upload with bandwidth throttling
@@ -249,7 +256,7 @@ echo "=== Test 4: Total outage mid-upload ==="
 ) &
 OUTAGE_PID=$!
 
-cat "${DATA_FILE}" | s3duct put \
+cat "${DATA_FILE_LARGE}" | s3duct put \
   --bucket "${BUCKET}" \
   --name "${PREFIX}-outage" \
   --chunk-size "${CHUNK_SIZE}" \
@@ -262,7 +269,7 @@ enable_proxy
 
 # Resume upload via clean connection
 echo "  Resuming upload..."
-cat "${DATA_FILE}" | s3duct put \
+cat "${DATA_FILE_LARGE}" | s3duct put \
   --bucket "${BUCKET}" \
   --name "${PREFIX}-outage" \
   --chunk-size "${CHUNK_SIZE}" \
@@ -278,7 +285,7 @@ s3duct get \
   > "${OUT_FILE}"
 
 ACTUAL=$(sha256sum "${OUT_FILE}" | cut -d' ' -f1)
-if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+if [ "${ACTUAL}" != "${EXPECTED_LARGE}" ]; then
   echo "FAIL: hash mismatch (outage recovery)"
   exit 1
 fi
@@ -326,10 +333,12 @@ echo "PASS: chaotic download OK"
 # =========================================================================
 echo ""
 echo "=== Test 6: Backpressure thrashing (tight disk + slow network) ==="
+# NOTE: Current uploader is single-threaded, so scratch usage stays ~1 chunk.
+# This test is forward-looking for future buffered/concurrent uploads.
 
-# Bandwidth oscillation in background
+# Bandwidth oscillation in background (runs until upload completes)
 (
-  for i in $(seq 1 10); do
+  while true; do
     add_toxic "bandwidth_limit" "bandwidth" '"rate":32' 2>/dev/null || true
     sleep 2
     remove_toxic "bandwidth_limit" 2>/dev/null || true
@@ -340,7 +349,22 @@ echo "=== Test 6: Backpressure thrashing (tight disk + slow network) ==="
 ) &
 BW_PID=$!
 
-cat "${DATA_FILE}" | s3duct put \
+# Log scratch usage to watch cache fluctuate
+SCRATCH_DIR="${S3DUCT_SCRATCH_DIR:-$HOME/.s3duct/scratch}"
+(
+  while true; do
+    if [ -d "${SCRATCH_DIR}" ]; then
+      usage_kb=$(du -sk "${SCRATCH_DIR}" 2>/dev/null | awk '{print $1}')
+      echo "  [scratch] $(date +%H:%M:%S) ${usage_kb:-0} KB used"
+    else
+      echo "  [scratch] $(date +%H:%M:%S) (dir missing)"
+    fi
+    sleep 1
+  done
+) &
+SCRATCH_PID=$!
+
+cat "${DATA_FILE_LARGE}" | s3duct put \
   --bucket "${BUCKET}" \
   --name "${PREFIX}-thrash" \
   --chunk-size "${CHUNK_SIZE}" \
@@ -349,7 +373,9 @@ cat "${DATA_FILE}" | s3duct put \
   --diskspace-limit 768K \
   --summary none
 
+kill ${BW_PID} ${SCRATCH_PID} 2>/dev/null || true
 wait ${BW_PID} 2>/dev/null || true
+wait ${SCRATCH_PID} 2>/dev/null || true
 clear_toxics
 
 s3duct get \
@@ -360,7 +386,7 @@ s3duct get \
   > "${OUT_FILE}"
 
 ACTUAL=$(sha256sum "${OUT_FILE}" | cut -d' ' -f1)
-if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+if [ "${ACTUAL}" != "${EXPECTED_LARGE}" ]; then
   echo "FAIL: hash mismatch (backpressure thrashing)"
   exit 1
 fi

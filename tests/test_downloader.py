@@ -187,6 +187,61 @@ def test_run_verify_missing_chunk(download_env):
         run_verify(backend, "verify-miss")
 
 
+def test_run_verify_encrypted_manifest(download_env):
+    """Verify should work on streams with encrypted manifests when --key is provided."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"verify encrypted manifest" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "verify-enc", chunk_size=CHUNK_SIZE,
+        encrypt=True, encryption_method="aes-256-gcm",
+        aes_key=aes_key, encrypt_manifest=True, scratch_dir=scratch,
+    )
+
+    # Verify with correct key should succeed
+    run_verify(backend, "verify-enc", aes_key=aes_key)
+
+
+def test_run_verify_encrypted_manifest_no_key(download_env):
+    """Verify without key on encrypted manifest should fail with helpful message."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"verify no key" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "verify-nokey", chunk_size=CHUNK_SIZE,
+        encrypt=True, encryption_method="aes-256-gcm",
+        aes_key=aes_key, encrypt_manifest=True, scratch_dir=scratch,
+    )
+
+    # Verify without key should fail with helpful error
+    with pytest.raises(Exception, match="[Ee]ncrypted|key"):
+        run_verify(backend, "verify-nokey")
+
+
 def test_run_get_aes_roundtrip(download_env):
     """Test full upload+download roundtrip with AES-256-GCM encryption."""
     import os
@@ -264,3 +319,51 @@ def test_run_get_no_decrypt_raw_download(download_env):
     assert raw_output != data
     # Raw output should not be empty
     assert len(raw_output) > 0
+
+
+def test_run_get_no_decrypt_json_summary(download_env, capsys):
+    """JSON summary should report chain_verified=False and raw_mode=True in raw mode."""
+    import json
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"json summary raw test" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "raw-json-test", chunk_size=CHUNK_SIZE,
+        encrypt=True, encryption_method="aes-256-gcm",
+        aes_key=aes_key, scratch_dir=scratch,
+    )
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    # Capture stderr by redirecting it
+    import io as _io
+    stderr_capture = _io.StringIO()
+    mp.setattr("click.utils._default_text_stderr", lambda: stderr_capture)
+
+    run_get(
+        backend, "raw-json-test", decrypt=False,
+        scratch_dir=scratch, summary="json",
+    )
+
+    # Find the JSON line in stderr output
+    stderr_capture.seek(0)
+    lines = stderr_capture.read().strip().split("\n")
+    json_line = [l for l in lines if l.startswith("{")]
+    assert json_line, f"No JSON found in stderr: {lines}"
+    report = json.loads(json_line[0])
+    assert report["chain_verified"] is False
+    assert report["raw_mode"] is True
+    assert report["status"] == "complete"

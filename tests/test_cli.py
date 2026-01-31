@@ -163,6 +163,24 @@ def test_cli_put_empty_name():
     assert result.exit_code != 0
 
 
+def test_cli_put_unencrypted_warning():
+    """Uploading without encryption should warn."""
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "put", "--bucket", "b", "--name", "n",
+    ], input="")
+    assert "No encryption configured" in result.output
+
+
+def test_cli_put_no_encrypt_suppresses_warning():
+    """--no-encrypt should suppress the unencrypted warning."""
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "put", "--bucket", "b", "--name", "n", "--no-encrypt",
+    ], input="")
+    assert "No encryption configured" not in result.output
+
+
 def test_cli_put_encrypt_manifest_requires_key():
     """--encrypt-manifest without --key should error."""
     runner = CliRunner()

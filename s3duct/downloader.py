@@ -145,17 +145,19 @@ def run_get(
             raise click.ClickException("Final chain mismatch. Stream may be incomplete or tampered.")
 
     if summary == "json":
-        click.echo(json.dumps({
+        report = {
             "status": "complete",
             "stream": name,
             "chunks_downloaded": manifest.chunk_count,
             "total_bytes": manifest.total_bytes,
             "stream_sha256": manifest.stream_sha256,
             "stream_sha3_256": manifest.stream_sha3_256,
-            "chain_verified": True,
+            "chain_verified": not raw_mode,
+            "raw_mode": raw_mode,
             "encrypted": manifest.encrypted,
             "encryption_method": manifest.encryption_method,
-        }), err=True)
+        }
+        click.echo(json.dumps(report), err=True)
     elif summary == "text":
         click.echo("Restore complete.", err=True)
 
@@ -195,12 +197,32 @@ def run_list(backend: StorageBackend, prefix: str = "") -> None:
 def run_verify(
     backend: StorageBackend,
     name: str,
+    aes_key: bytes | None = None,
     summary: str = "text",  # "text", "json", or "none"
 ) -> None:
     """Verify integrity of a stored stream without downloading chunk data."""
     manifest_key = Manifest.s3_key(name)
     raw = backend.download_bytes(manifest_key)
-    manifest = Manifest.from_json(raw)
+
+    try:
+        manifest = Manifest.from_json(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        if aes_key:
+            from s3duct.encryption import aes_decrypt_manifest
+            try:
+                raw = aes_decrypt_manifest(raw, aes_key)
+                manifest = Manifest.from_json(raw)
+                click.echo("Manifest decrypted successfully.", err=True)
+            except Exception:
+                raise click.ClickException(
+                    "Manifest appears encrypted but could not be decrypted. "
+                    "Check your key."
+                )
+        else:
+            raise click.ClickException(
+                "Manifest is not valid JSON — it may be encrypted. "
+                "Provide --key to decrypt."
+            )
 
     click.echo(f"Verifying {manifest.chunk_count} chunks...", err=True)
     errors = 0
