@@ -24,6 +24,8 @@ AES_KEY="hex:$(python3 -c 'import os; print(os.urandom(32).hex())')"
 STREAM_NAME="${PREFIX}-roundtrip"
 STREAM_NAME_ENC="${PREFIX}-roundtrip-enc"
 STREAM_NAME_ENCM="${PREFIX}-roundtrip-encmanifest"
+STREAM_NAME_AGE="${PREFIX}-roundtrip-age"
+STREAM_NAME_AGEM="${PREFIX}-roundtrip-age-encmanifest"
 
 cleanup() {
   echo "--- Cleanup ---"
@@ -35,7 +37,9 @@ cleanup() {
   aws $aws_ep s3 rm "s3://${BUCKET}/${STREAM_NAME}/" --recursive 2>/dev/null || true
   aws $aws_ep s3 rm "s3://${BUCKET}/${STREAM_NAME_ENC}/" --recursive 2>/dev/null || true
   aws $aws_ep s3 rm "s3://${BUCKET}/${STREAM_NAME_ENCM}/" --recursive 2>/dev/null || true
-  rm -f /tmp/s3duct-test-input.bin /tmp/s3duct-test-output.bin
+  aws $aws_ep s3 rm "s3://${BUCKET}/${STREAM_NAME_AGE}/" --recursive 2>/dev/null || true
+  aws $aws_ep s3 rm "s3://${BUCKET}/${STREAM_NAME_AGEM}/" --recursive 2>/dev/null || true
+  rm -f /tmp/s3duct-test-input.bin /tmp/s3duct-test-output.bin /tmp/s3duct-test-age-key.txt
 }
 trap cleanup EXIT
 
@@ -148,6 +152,82 @@ if [ "${ACTUAL}" != "${EXPECTED}" ]; then
   exit 1
 fi
 echo "PASS: encrypted manifest roundtrip OK"
+
+# =========================================================================
+# Test 4: age encrypted roundtrip (skip if age not installed)
+# =========================================================================
+if command -v age-keygen >/dev/null 2>&1; then
+  echo ""
+  echo "=== Test 4: age encrypted upload/download ==="
+
+  age-keygen -o /tmp/s3duct-test-age-key.txt 2>/dev/null
+
+  cat /tmp/s3duct-test-input.bin | s3duct put \
+    --bucket "${BUCKET}" \
+    --name "${STREAM_NAME_AGE}" \
+    --chunk-size "${CHUNK_SIZE}" \
+    --age-identity /tmp/s3duct-test-age-key.txt \
+    --no-encrypt-manifest \
+    --tag test=age \
+    ${ENDPOINT_OPT}
+
+  s3duct get \
+    --bucket "${BUCKET}" \
+    --name "${STREAM_NAME_AGE}" \
+    --age-identity /tmp/s3duct-test-age-key.txt \
+    ${ENDPOINT_OPT} \
+    > /tmp/s3duct-test-output.bin
+
+  ACTUAL=$(sha256sum /tmp/s3duct-test-output.bin | cut -d' ' -f1)
+  if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+    echo "FAIL: hash mismatch (age)"
+    echo "  expected: ${EXPECTED}"
+    echo "  actual:   ${ACTUAL}"
+    exit 1
+  fi
+  echo "PASS: age encrypted roundtrip OK"
+
+  # =========================================================================
+  # Test 5: age encrypted manifest roundtrip
+  # =========================================================================
+  echo ""
+  echo "=== Test 5: age encrypted manifest ==="
+
+  cat /tmp/s3duct-test-input.bin | s3duct put \
+    --bucket "${BUCKET}" \
+    --name "${STREAM_NAME_AGEM}" \
+    --chunk-size "${CHUNK_SIZE}" \
+    --age-identity /tmp/s3duct-test-age-key.txt \
+    --encrypt-manifest \
+    --tag test=age-encrypted-manifest \
+    ${ENDPOINT_OPT}
+
+  echo "--- Verify with age identity ---"
+  s3duct verify \
+    --bucket "${BUCKET}" \
+    --name "${STREAM_NAME_AGEM}" \
+    --age-identity /tmp/s3duct-test-age-key.txt \
+    ${ENDPOINT_OPT}
+
+  s3duct get \
+    --bucket "${BUCKET}" \
+    --name "${STREAM_NAME_AGEM}" \
+    --age-identity /tmp/s3duct-test-age-key.txt \
+    ${ENDPOINT_OPT} \
+    > /tmp/s3duct-test-output.bin
+
+  ACTUAL=$(sha256sum /tmp/s3duct-test-output.bin | cut -d' ' -f1)
+  if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+    echo "FAIL: hash mismatch (age encrypted manifest)"
+    echo "  expected: ${EXPECTED}"
+    echo "  actual:   ${ACTUAL}"
+    exit 1
+  fi
+  echo "PASS: age encrypted manifest roundtrip OK"
+else
+  echo ""
+  echo "=== Skipping age tests (age-keygen not found) ==="
+fi
 
 echo ""
 echo "=== All integration tests passed ==="
