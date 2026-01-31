@@ -1,5 +1,9 @@
 # s3duct
 
+[![PyPI](https://img.shields.io/pypi/v/s3duct)](https://pypi.org/project/s3duct/)
+[![Python](https://img.shields.io/pypi/pyversions/s3duct)](https://pypi.org/project/s3duct/)
+[![License](https://img.shields.io/pypi/l/s3duct)](LICENSE)
+
 Chunked, resumable, encrypted pipe to S3-compatible object storage.
 
 Stream data from stdin directly to S3 in fixed-size chunks with integrity
