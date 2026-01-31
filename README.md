@@ -15,6 +15,8 @@ verification, optional encryption, cache management, and automatic resume on fai
   or reordering
 - **Encryption** - optional client-side encryption: AES-256-GCM (symmetric) or
   [age](https://age-encryption.org/) (asymmetric, with optional post-quantum keys)
+- **Parallel uploads** - adaptive multi-threaded upload pipeline with automatic
+  concurrency scaling
 - **Backpressure** - disk-aware flow control prevents scratch directory from filling up
 - **S3-compatible** - works with AWS S3, Cloudflare R2, MinIO, Backblaze B2, Wasabi,
   and any S3-compatible endpoint via `--endpoint-url`
@@ -28,11 +30,14 @@ pip install s3duct
 For development:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/SiteRelEnby/s3duct
 cd s3duct
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+
+# run tests
+pytest
 ```
 
 ## AWS Credentials
@@ -104,17 +109,16 @@ s3duct supports two encryption methods. Both encrypt each chunk client-side
 before upload. The manifest records which method was used, so `get`
 auto-detects the decryption path.
 
-Manifest encryption is currently only supported for AES-256; age will be supported
-in a later release.
+The manifest is encrypted by default when encryption is active (both AES-256-GCM
+and age are supported). Use `--no-encrypt-manifest` to keep the manifest as
+readable JSON if needed.
 
 If the manifest is unencrypted, it exposes metadata only (not plaintext): stream
 name/prefix, chunk count, per-chunk sizes, hashes, ETags, timestamps, storage
 class, tags, and the encryption method/recipient. With read access to the bucket,
 many of these (object keys, sizes, storage class, timestamps, and ETags) are
 already inferable from object listings and HEADs, but the manifest makes it
-trivial to enumerate and correlate. This is usually low-risk but can leak file
-sizes, change cadence, and other patterns — use `--encrypt-manifest` if that
-matters.
+trivial to enumerate and correlate.
 
 ### AES-256-GCM (symmetric)
 
@@ -137,9 +141,9 @@ Key formats:
 - `file:/path/to/keyfile` — raw 32-byte file
 - `env:VAR_NAME` — environment variable containing hex key
 
-To also encrypt the manifest (hides chunk count, sizes, timestamps):
+The manifest is encrypted by default with AES. To keep it as readable JSON:
 ```bash
-s3duct put --bucket b --name n --key hex:... --encrypt-manifest
+s3duct put --bucket b --name n --key hex:... --no-encrypt-manifest
 ```
 
 Each chunk is encrypted with a random 96-bit nonce. A nonce collision
@@ -251,16 +255,20 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--key` | | AES-256-GCM key (`hex:...`, `file:...`, or `env:...`) |
 | `--age-identity` | | Path to age identity file (mutually exclusive with `--key`) |
 | `--no-encrypt` | | Disable encryption even if key/identity provided |
-| `--encrypt-manifest` | | Also encrypt the manifest under the same AES key |
+| `--encrypt-manifest/--no-encrypt-manifest` | on when encrypted | Encrypt manifest with same key/identity as chunks |
 | `--tag` | | Custom metadata tag (`key=value`, repeatable) |
 | `--storage-class` | `STANDARD` | S3 storage class |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
-| `--strict-resume/--no-strict-resume` | on | Fail if stdin ends before all resume-log chunks are re-verified |
-| `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 | `--diskspace-limit` | auto | Max scratch disk usage (e.g., `2G`) |
 | `--buffer-chunks` | auto | Max buffered chunks before backpressure |
+| `--strict-resume/--no-strict-resume` | on | Fail if stdin ends before all resume-log chunks are re-verified |
+| `--retries` | `10` | Max retry attempts per S3 operation |
+| `--upload-workers` | `auto` | Parallel upload threads (`auto` adapts based on throughput, or an integer for fixed concurrency) |
+| `--min-upload-workers` | `2` | Minimum workers for auto mode |
+| `--max-upload-workers` | `16` | Maximum workers for auto mode |
+| `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct get`
 
@@ -271,10 +279,11 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--key` | | AES-256-GCM key (`hex:...`, `file:...`, or `env:...`) |
 | `--age-identity` | | Path to age identity file (mutually exclusive with `--key`) |
 | `--no-decrypt` | | Skip decryption (download raw encrypted chunks) |
-| `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--retries` | `10` | Max retry attempts per S3 operation |
+| `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct list`
 
@@ -291,25 +300,39 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 |--------|---------|-------------|
 | `--bucket` | (required) | S3 bucket name |
 | `--name` | (required) | Stream name to verify |
-| `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
+| `--key` | | AES-256-GCM key (required if manifest is encrypted with AES) |
+| `--age-identity` | | Path to age identity file (required if manifest is encrypted with age) |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--retries` | `10` | Max retry attempts per S3 operation |
+| `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ## How It Works
 
 ### Upload Pipeline
 
 ```
+Main thread                         Thread pool (auto-scaled)
+──────────                          ────────────────────────
 stdin → chunk (512MB default)
      → SHA-256 + SHA3-256 dual hash
      → HMAC-SHA256 signature chain
-     → optional encryption (AES-256-GCM or age)
-     → S3 upload with retry
+     → optional encryption ──────→  S3 upload with retry (parallel)
+     → when window full: drain  ←─  result + ETag
+       oldest upload
      → append to resume log
      → repeat until EOF
-     → upload manifest
+     → drain remaining uploads
+     → upload manifest (encrypted by default)
 ```
+
+Uploads run in parallel using a sliding window. The main thread reads,
+hashes, and encrypts sequentially (these depend on ordering), then
+submits uploads to a thread pool. Completed uploads are drained
+oldest-first to maintain strict resume log ordering. Worker count
+auto-scales based on upload-vs-read throughput ratio (override with
+`--upload-workers N`).
 
 ### Integrity Chain
 
@@ -362,15 +385,6 @@ s3duct monitors available disk space in its scratch directory and pauses
 reading from stdin when approaching the limit. By default it auto-tunes
 based on available disk (2-10 chunks buffered). Use `--diskspace-limit`
 or `--buffer-chunks` for explicit control.
-
-## Development
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-```
 
 ## License
 
