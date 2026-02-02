@@ -512,11 +512,6 @@ def run_put(
     backend.upload_bytes(manifest_key, manifest_bytes, "STANDARD")
     click.echo(f"Manifest uploaded to {manifest_key}", err=True)
 
-    # Upload resume log as checkpoint
-    if resume_log.path.exists():
-        log_key = f"{name}/{resume_log.s3_key}"
-        backend.upload(log_key, resume_log.path, "STANDARD")
-
     # Clean up local resume log
     resume_log.clear()
 

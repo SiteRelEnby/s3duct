@@ -302,7 +302,7 @@ def test_run_put_parallel_basic(upload_env):
 
 
 def test_run_put_parallel_ordering(upload_env):
-    """Verify resume log entries are in strict order with parallel workers."""
+    """Verify manifest chunks are in strict order with parallel workers."""
     backend, client, scratch, session, mp = upload_env
     data = b"o" * (CHUNK_SIZE * 5 + 20)
     _mock_stdin(mp, data)
@@ -310,12 +310,17 @@ def test_run_put_parallel_ordering(upload_env):
     run_put(backend, "par-order", chunk_size=CHUNK_SIZE,
             encrypt=False, scratch_dir=scratch, upload_workers=4)
 
-    # Check resume log was uploaded in order
+    # Check manifest chunks are in order
     raw = client.get_object(Bucket="test-bucket",
-                            Key="par-order/.resume.jsonl")["Body"].read()
-    lines = [l for l in raw.decode().strip().split("\n") if l]
-    indices = [json.loads(l)["chunk"] for l in lines]
+                            Key="par-order/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    indices = [c.index for c in manifest.chunks]
     assert indices == list(range(6))
+
+    # Resume log should not be on S3 (local-only)
+    with pytest.raises(client.exceptions.NoSuchKey):
+        client.get_object(Bucket="test-bucket",
+                          Key="par-order/.resume.jsonl")
 
 
 def test_run_put_workers_1_sequential(upload_env):
