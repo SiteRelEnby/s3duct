@@ -254,5 +254,47 @@ def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retrie
     run_verify(backend, name, aes_key=aes_key, age_identity=age_identity, summary=summary)
 
 
+@main.command()
+@click.option("--bucket", required=True, help="S3 bucket name.")
+@click.option("--name", required=True, help="Stream name to restore from Glacier.")
+@click.option("--days", default=7, type=int, help="Days to keep restored copies (default: 7).")
+@click.option("--tier", default="Standard",
+              type=click.Choice(["Expedited", "Standard", "Bulk"], case_sensitive=True),
+              help="Restore tier (default: Standard).")
+@click.option("--wait", is_flag=True, default=False, help="Poll until all chunks are restored.")
+@click.option("--poll-interval", default=60, type=int, help="Seconds between status checks (default: 60).")
+@click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...).")
+@click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file.")
+@click.option("--region", default=None, help="AWS region.")
+@click.option("--prefix", default="", help="S3 key prefix.")
+@click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+def restore(bucket, name, days, tier, wait, poll_interval, key, age_identity,
+            region, prefix, endpoint_url, retries):
+    """Initiate Glacier/Deep Archive restore for a stream's chunks."""
+    from s3duct.encryption import parse_key
+    from s3duct.thaw import run_restore
+
+    validate_name(name)
+
+    if key and age_identity:
+        raise click.ClickException("--key and --age-identity are mutually exclusive.")
+
+    aes_key = parse_key(key) if key else None
+
+    backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
+                        endpoint_url=endpoint_url, max_retries=retries)
+    run_restore(
+        backend=backend,
+        name=name,
+        days=days,
+        tier=tier,
+        wait=wait,
+        poll_interval=poll_interval,
+        aes_key=aes_key,
+        age_identity=age_identity,
+    )
+
+
 if __name__ == "__main__":
     main()

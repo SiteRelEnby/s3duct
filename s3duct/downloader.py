@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import click
+from botocore.exceptions import ClientError
 
 from s3duct import __version__
 from s3duct.backends.base import StorageBackend
@@ -118,7 +119,18 @@ def run_get(
 
         # Download
         click.echo(f"  Downloading chunk {chunk_rec.index}...", err=True)
-        backend.download(chunk_rec.s3_key, chunk_path)
+        try:
+            backend.download(chunk_rec.s3_key, chunk_path)
+        except ClientError as e:
+            code = e.response["Error"].get("Code", "")
+            if code == "InvalidObjectState":
+                raise click.ClickException(
+                    f"Chunk {chunk_rec.index} is archived in Glacier/Deep Archive "
+                    f"and not available for download.\n"
+                    f"Run 's3duct restore --bucket <bucket> --name {name}' to "
+                    f"initiate thaw, then retry."
+                )
+            raise
 
         # Decrypt if needed
         if decrypt and manifest.encrypted:
@@ -210,6 +222,7 @@ def run_list(backend: StorageBackend, prefix: str = "") -> None:
             raw = backend.download_bytes(obj.key)
             m = Manifest.from_json(raw)
             encrypted = " [encrypted]" if m.encrypted else ""
+            sc = f" [{m.storage_class}]" if m.storage_class and m.storage_class != "STANDARD" else ""
             ver = f"  v{m.tool_version}" if m.tool_version else ""
             click.echo(
                 f"{stream_name}  "
@@ -217,6 +230,7 @@ def run_list(backend: StorageBackend, prefix: str = "") -> None:
                 f"{m.total_bytes:,} bytes  "
                 f"{m.created}"
                 f"{encrypted}"
+                f"{sc}"
                 f"{ver}"
             )
         except (json.JSONDecodeError, UnicodeDecodeError):

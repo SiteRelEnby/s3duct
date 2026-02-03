@@ -17,9 +17,29 @@ from botocore.exceptions import (
 from s3duct.backends.base import ObjectInfo, StorageBackend
 from s3duct.config import MAX_RETRY_ATTEMPTS, RETRY_BASE_DELAY, RETRY_MAX_DELAY
 
-# Errors worth retrying: API errors + connection-level failures
-_RETRYABLE = (ClientError, ConnectionClosedError, ConnectTimeoutError,
-              EndpointConnectionError, ReadTimeoutError, ConnectionError, OSError)
+# Transport-level errors always worth retrying
+_RETRYABLE_TRANSPORT = (
+    ConnectionClosedError, ConnectTimeoutError,
+    EndpointConnectionError, ReadTimeoutError,
+    ConnectionError, OSError,
+)
+
+# ClientError codes that are safe to retry (transient server-side issues)
+_RETRYABLE_CODES = frozenset({
+    "500", "503", "InternalError", "ServiceUnavailable",
+    "SlowDown", "RequestTimeout", "RequestTimedOut",
+    "Throttling", "TooManyRequestsException",
+})
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Check if an exception is worth retrying."""
+    if isinstance(exc, _RETRYABLE_TRANSPORT):
+        return True
+    if isinstance(exc, ClientError):
+        code = exc.response["Error"].get("Code", "")
+        return code in _RETRYABLE_CODES
+    return False
 
 
 class S3Backend(StorageBackend):
@@ -63,6 +83,10 @@ class S3Backend(StorageBackend):
     def _full_key(self, key: str) -> str:
         return f"{self._prefix}{key}"
 
+    def _retry_delay(self, attempt: int) -> None:
+        delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
+        time.sleep(delay)
+
     def upload(self, key: str, file_path: Path, storage_class: str | None = None) -> str:
         full_key = self._full_key(key)
         extra_args = {}
@@ -79,11 +103,10 @@ class S3Backend(StorageBackend):
                 )
                 resp = self._client.head_object(Bucket=self._bucket, Key=full_key)
                 return resp["ETag"]
-            except _RETRYABLE:
-                if attempt == self._max_retries - 1:
+            except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
-                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
-                time.sleep(delay)
+                self._retry_delay(attempt)
         raise RuntimeError("unreachable")
 
     def upload_bytes(self, key: str, data: bytes, storage_class: str | None = None) -> str:
@@ -96,11 +119,10 @@ class S3Backend(StorageBackend):
             try:
                 resp = self._client.put_object(**kwargs)
                 return resp["ETag"]
-            except _RETRYABLE:
-                if attempt == self._max_retries - 1:
+            except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
-                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
-                time.sleep(delay)
+                self._retry_delay(attempt)
         raise RuntimeError("unreachable")
 
     def download(self, key: str, dest_path: Path) -> None:
@@ -109,11 +131,10 @@ class S3Backend(StorageBackend):
             try:
                 self._client.download_file(self._bucket, full_key, str(dest_path))
                 return
-            except _RETRYABLE:
-                if attempt == self._max_retries - 1:
+            except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
-                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
-                time.sleep(delay)
+                self._retry_delay(attempt)
 
     def download_bytes(self, key: str) -> bytes:
         full_key = self._full_key(key)
@@ -121,11 +142,10 @@ class S3Backend(StorageBackend):
             try:
                 resp = self._client.get_object(Bucket=self._bucket, Key=full_key)
                 return resp["Body"].read()
-            except _RETRYABLE:
-                if attempt == self._max_retries - 1:
+            except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
-                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
-                time.sleep(delay)
+                self._retry_delay(attempt)
         raise RuntimeError("unreachable")
 
     def list_objects(self, prefix: str) -> list[ObjectInfo]:

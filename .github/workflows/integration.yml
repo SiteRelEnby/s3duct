@@ -34,6 +34,7 @@ jobs:
   simple:
     if: ${{ inputs.simple }}
     runs-on: ubuntu-latest
+    environment: aws-live
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -44,7 +45,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          pip install -e ".[dev]"
+          sudo apt-get install -y age
 
       - name: Run roundtrip
         run: bash tests/integration/roundtrip.sh
@@ -157,6 +160,7 @@ jobs:
   huge-file:
     if: ${{ inputs.huge_file }}
     runs-on: ubuntu-latest
+    environment: aws-live
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -206,96 +210,138 @@ jobs:
           rm -f /tmp/huge-test.bin /tmp/restored.bin /tmp/expected.sha256
 
   # --------------------------------------------------------------------------
-  # Glacier: upload to GLACIER, thaw, restore
+  # Glacier: upload to GLACIER, thaw with s3duct restore, download, verify
   # --------------------------------------------------------------------------
   glacier:
     if: ${{ inputs.glacier }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # thaw can take hours
+    environment: aws-live  # requires manual approval
+    timeout-minutes: 30    # Expedited restore: 1-5 min
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       S3DUCT_TEST_BUCKET: ${{ secrets.S3DUCT_TEST_BUCKET }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION || 'us-east-1' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev]" awscli
 
-      - name: Upload to GLACIER
+      - name: Generate test data
         run: |
-          dd if=/dev/urandom bs=1K count=64 | s3duct put \
+          dd if=/dev/urandom of=/tmp/glacier-input.bin bs=1K count=128 2>/dev/null
+          sha256sum /tmp/glacier-input.bin | cut -d' ' -f1 > /tmp/glacier-expected.sha256
+          echo "Input SHA256: $(cat /tmp/glacier-expected.sha256)"
+
+      - name: Upload to GLACIER (unencrypted)
+        run: |
+          cat /tmp/glacier-input.bin | s3duct put \
             --bucket "${S3DUCT_TEST_BUCKET}" \
-            --name "${S3DUCT_TEST_PREFIX}-glacier" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-plain" \
             --chunk-size 32K \
             --storage-class GLACIER \
             --tag test=glacier \
             --no-encrypt
 
-      - name: Initiate restore (Expedited tier)
+      - name: Upload to GLACIER (AES + encrypted manifest)
         run: |
-          # Expedited tier: 1-5 minutes for GLACIER (not available for DEEP_ARCHIVE)
-          # This uses aws cli directly since s3duct thaw isn't implemented yet
-          MANIFEST_KEY="${S3DUCT_TEST_PREFIX}-glacier/.manifest.json"
-          aws s3 cp "s3://${S3DUCT_TEST_BUCKET}/${MANIFEST_KEY}" /tmp/manifest.json
-          # Extract chunk keys from manifest and request restore for each
-          python3 -c "
-          import json, subprocess, sys, os
-          m = json.load(open('/tmp/manifest.json'))
-          bucket = os.environ['S3DUCT_TEST_BUCKET']
-          for c in m['chunks']:
-              key = c['s3_key']
-              print(f'Restoring {key}...')
-              subprocess.run([
-                  'aws', 's3api', 'restore-object',
-                  '--bucket', bucket,
-                  '--key', key,
-                  '--restore-request', '{\"Days\":1,\"GlacierJobParameters\":{\"Tier\":\"Expedited\"}}'
-              ], check=True)
-          "
+          AES_KEY="hex:$(python3 -c 'import os; print(os.urandom(32).hex())')"
+          echo "$AES_KEY" > /tmp/glacier-aes-key.txt
+          cat /tmp/glacier-input.bin | s3duct put \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-enc" \
+            --chunk-size 32K \
+            --storage-class GLACIER \
+            --key "$AES_KEY" \
+            --tag test=glacier-enc
 
-      - name: Wait for thaw (poll every 60s, up to 30 min)
+      - name: List streams (should show [GLACIER])
         run: |
-          python3 -c "
-          import json, subprocess, time, os
-          m = json.load(open('/tmp/manifest.json'))
-          bucket = os.environ['S3DUCT_TEST_BUCKET']
-          keys = [c['s3_key'] for c in m['chunks']]
-          for attempt in range(30):
-              all_ready = True
-              for key in keys:
-                  result = subprocess.run(
-                      ['aws', 's3api', 'head-object', '--bucket', bucket, '--key', key],
-                      capture_output=True, text=True
-                  )
-                  output = json.loads(result.stdout) if result.stdout else {}
-                  restore = output.get('Restore', '')
-                  if 'ongoing-request=\"true\"' in restore:
-                      all_ready = False
-                      break
-              if all_ready:
-                  print(f'All chunks thawed after {attempt + 1} poll(s)')
-                  break
-              print(f'Poll {attempt + 1}/30: still thawing...')
-              time.sleep(60)
-          else:
-              print('Timed out waiting for thaw')
-              exit(1)
-          "
+          OUTPUT=$(s3duct list --bucket "${S3DUCT_TEST_BUCKET}" --prefix "${S3DUCT_TEST_PREFIX}-glacier")
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "GLACIER" || { echo "FAIL: [GLACIER] not in list output"; exit 1; }
 
-      - name: Download and verify
+      - name: Verify get fails before restore
+        run: |
+          s3duct get \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-plain" \
+            > /dev/null 2>&1 && { echo "FAIL: get should have failed"; exit 1; } \
+            || echo "PASS: get correctly failed on unrestored Glacier stream"
+
+      - name: Restore (Expedited, --wait)
+        run: |
+          s3duct restore \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-plain" \
+            --tier Expedited --days 1 \
+            --wait --poll-interval 30
+
+      - name: Restore encrypted stream
+        run: |
+          AES_KEY=$(cat /tmp/glacier-aes-key.txt)
+          s3duct restore \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-enc" \
+            --key "$AES_KEY" \
+            --tier Expedited --days 1 \
+            --wait --poll-interval 30
+
+      - name: Download and verify (unencrypted)
+        run: |
+          s3duct get \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-plain" \
+            > /tmp/glacier-restored.bin
+          ACTUAL=$(sha256sum /tmp/glacier-restored.bin | cut -d' ' -f1)
+          EXPECTED=$(cat /tmp/glacier-expected.sha256)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: hash mismatch (unencrypted)"
+            echo "  expected: $EXPECTED"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
+          echo "PASS: unencrypted Glacier roundtrip OK"
+
+      - name: Download and verify (encrypted)
+        run: |
+          AES_KEY=$(cat /tmp/glacier-aes-key.txt)
+          s3duct get \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-enc" \
+            --key "$AES_KEY" \
+            > /tmp/glacier-enc-restored.bin
+          ACTUAL=$(sha256sum /tmp/glacier-enc-restored.bin | cut -d' ' -f1)
+          EXPECTED=$(cat /tmp/glacier-expected.sha256)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: hash mismatch (encrypted)"
+            echo "  expected: $EXPECTED"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
+          echo "PASS: encrypted Glacier roundtrip OK"
+
+      - name: Verify integrity
         run: |
           s3duct verify \
             --bucket "${S3DUCT_TEST_BUCKET}" \
-            --name "${S3DUCT_TEST_PREFIX}-glacier"
-          echo "Glacier roundtrip verified"
+            --name "${S3DUCT_TEST_PREFIX}-glacier-plain"
+          AES_KEY=$(cat /tmp/glacier-aes-key.txt)
+          s3duct verify \
+            --bucket "${S3DUCT_TEST_BUCKET}" \
+            --name "${S3DUCT_TEST_PREFIX}-glacier-enc" \
+            --key "$AES_KEY"
+          echo "PASS: Glacier integrity verified"
 
       - name: Cleanup
         if: always()
         run: |
-          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-glacier/" --recursive 2>/dev/null || true
+          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-glacier-plain/" --recursive 2>/dev/null || true
+          aws s3 rm "s3://${S3DUCT_TEST_BUCKET}/${S3DUCT_TEST_PREFIX}-glacier-enc/" --recursive 2>/dev/null || true
+          rm -f /tmp/glacier-*.bin /tmp/glacier-*.sha256 /tmp/glacier-aes-key.txt
 
   # --------------------------------------------------------------------------
   # Compat: backward compatibility with older manifest versions
