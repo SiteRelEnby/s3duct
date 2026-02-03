@@ -260,8 +260,9 @@ jobs:
 
       - name: List streams (should show [GLACIER])
         run: |
-          OUTPUT=$(s3duct list --bucket "${S3DUCT_TEST_BUCKET}" --prefix "${S3DUCT_TEST_PREFIX}-glacier")
+          OUTPUT=$(s3duct list --bucket "${S3DUCT_TEST_BUCKET}")
           echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "${S3DUCT_TEST_PREFIX}-glacier-plain" || { echo "FAIL: plain stream not in list"; exit 1; }
           echo "$OUTPUT" | grep -q "GLACIER" || { echo "FAIL: [GLACIER] not in list output"; exit 1; }
 
       - name: Verify get fails before restore
