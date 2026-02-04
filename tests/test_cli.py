@@ -216,3 +216,30 @@ def test_cli_verify_key_and_age_mutual_exclusion(tmp_path):
     ])
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
+
+
+def test_cli_delete_help():
+    """delete command should show all expected options."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["delete", "--help"])
+    assert result.exit_code == 0
+    assert "--bucket" in result.output
+    assert "--name" in result.output
+    assert "--dry-run" in result.output
+    assert "--force" in result.output
+    assert "--key" in result.output
+    assert "--age-identity" in result.output
+
+
+def test_cli_delete_key_and_age_mutual_exclusion(tmp_path):
+    """delete --key + --age-identity should error."""
+    identity = tmp_path / "id.txt"
+    identity.write_text("AGE-SECRET-KEY-1FAKE")
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "delete", "--bucket", "b", "--name", "n", "--force",
+        "--key", "hex:" + "aa" * 32,
+        "--age-identity", str(identity),
+    ])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output

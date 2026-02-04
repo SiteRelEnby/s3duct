@@ -9,7 +9,7 @@ import pytest
 from moto import mock_aws
 
 from s3duct.backends.s3 import S3Backend
-from s3duct.downloader import run_get, run_list, run_verify
+from s3duct.downloader import run_delete, run_get, run_list, run_verify
 from s3duct.encryption import age_available
 from s3duct.integrity import compute_chain, DualHash
 from s3duct.manifest import ChunkRecord, Manifest
@@ -566,3 +566,74 @@ def test_run_verify_age_encrypted_manifest(download_env):
 
     # Verify with identity should succeed (no exception)
     run_verify(backend, "age-verify", age_identity=str(identity))
+
+
+# --- delete tests ---
+
+
+def test_run_delete_basic(download_env):
+    """run_delete should remove all chunks and the manifest."""
+    backend, client, scratch, mp = download_env
+    data = b"delete me" * 10
+    _upload_test_stream(client, "del-test", data)
+
+    # Verify objects exist
+    resp = client.list_objects_v2(Bucket="test-bucket", Prefix="del-test/")
+    assert resp["KeyCount"] > 0
+
+    run_delete(backend, "del-test")
+
+    # All objects should be gone
+    resp = client.list_objects_v2(Bucket="test-bucket", Prefix="del-test/")
+    assert resp.get("KeyCount", 0) == 0
+
+
+def test_run_delete_dry_run(download_env):
+    """--dry-run should list objects but not delete them."""
+    backend, client, scratch, mp = download_env
+    data = b"dry run" * 10
+    _upload_test_stream(client, "dry-test", data)
+
+    resp = client.list_objects_v2(Bucket="test-bucket", Prefix="dry-test/")
+    count_before = resp["KeyCount"]
+
+    run_delete(backend, "dry-test", dry_run=True)
+
+    # Objects should still exist
+    resp = client.list_objects_v2(Bucket="test-bucket", Prefix="dry-test/")
+    assert resp["KeyCount"] == count_before
+
+
+def test_run_delete_encrypted_manifest(download_env):
+    """Delete should work with AES-encrypted manifests."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"delete encrypted" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "del-enc", chunk_size=CHUNK_SIZE,
+        encrypt=True, encrypt_manifest=True,
+        encryption_method="aes-256-gcm", aes_key=aes_key,
+        scratch_dir=scratch,
+    )
+
+    # Verify objects exist
+    resp = client.list_objects_v2(Bucket="test-bucket", Prefix="del-enc/")
+    assert resp["KeyCount"] > 0
+
+    run_delete(backend, "del-enc", aes_key=aes_key)
+
+    # All objects should be gone
+    resp = client.list_objects_v2(Bucket="test-bucket", Prefix="del-enc/")
+    assert resp.get("KeyCount", 0) == 0

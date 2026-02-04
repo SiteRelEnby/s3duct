@@ -239,6 +239,44 @@ def run_list(backend: StorageBackend, prefix: str = "") -> None:
             click.echo(f"{stream_name}  (manifest unreadable)")
 
 
+def run_delete(
+    backend: StorageBackend,
+    name: str,
+    dry_run: bool = False,
+    aes_key: bytes | None = None,
+    age_identity: str | None = None,
+) -> None:
+    """Delete a stream (all chunks + manifest)."""
+    backend.preflight_check()
+
+    manifest_key = Manifest.s3_key(name)
+    click.echo(f"Downloading manifest...", err=True)
+    raw = backend.download_bytes(manifest_key)
+    manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
+
+    # Collect all keys to delete
+    keys_to_delete = [c.s3_key for c in manifest.chunks]
+    keys_to_delete.append(manifest_key)
+
+    if dry_run:
+        click.echo(f"Would delete {len(keys_to_delete)} objects:", err=True)
+        for key in keys_to_delete:
+            click.echo(f"  {key}", err=True)
+        return
+
+    click.echo(f"Deleting {len(keys_to_delete)} objects...", err=True)
+    deleted = 0
+    for key in keys_to_delete:
+        try:
+            backend.delete_object(key)
+            deleted += 1
+            click.echo(f"  Deleted {key}", err=True)
+        except Exception as e:
+            click.echo(f"  Failed to delete {key}: {e}", err=True)
+
+    click.echo(f"Done. Deleted {deleted}/{len(keys_to_delete)} objects.", err=True)
+
+
 def run_verify(
     backend: StorageBackend,
     name: str,

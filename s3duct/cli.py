@@ -256,6 +256,41 @@ def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retrie
 
 @main.command()
 @click.option("--bucket", required=True, help="S3 bucket name.")
+@click.option("--name", required=True, help="Stream name to delete.")
+@click.option("--dry-run", is_flag=True, default=False, help="List what would be deleted without deleting.")
+@click.option("--force", is_flag=True, default=False, help="Skip confirmation prompt.")
+@click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...). Required if manifest is encrypted with AES.")
+@click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file. Required if manifest is encrypted with age.")
+@click.option("--region", default=None, help="AWS region.")
+@click.option("--prefix", default="", help="S3 key prefix.")
+@click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endpoint_url, retries):
+    """Delete a stream and all its chunks from S3."""
+    from s3duct.encryption import parse_key
+    from s3duct.downloader import run_delete
+
+    validate_name(name)
+
+    if key and age_identity:
+        raise click.ClickException("--key and --age-identity are mutually exclusive.")
+
+    aes_key = parse_key(key) if key else None
+
+    if not dry_run and not force:
+        click.confirm(
+            f"Delete stream '{name}' and all its chunks from s3://{bucket}?",
+            abort=True,
+            err=True,
+        )
+
+    backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
+                        endpoint_url=endpoint_url, max_retries=retries)
+    run_delete(backend, name, dry_run=dry_run, aes_key=aes_key, age_identity=age_identity)
+
+
+@main.command()
+@click.option("--bucket", required=True, help="S3 bucket name.")
 @click.option("--name", required=True, help="Stream name to restore from Glacier.")
 @click.option("--days", default=7, type=int, help="Days to keep restored copies (default: 7).")
 @click.option("--tier", default="Standard",
