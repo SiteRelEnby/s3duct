@@ -301,3 +301,11 @@ def test_cli_restore_progress_option():
     result = runner.invoke(main, ["restore", "--help"])
     assert result.exit_code == 0
     assert "--progress" in result.output
+
+
+def test_cli_put_clobber_option():
+    """put command should accept --clobber."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--clobber" in result.output

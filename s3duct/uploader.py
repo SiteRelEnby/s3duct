@@ -13,6 +13,7 @@ from pathlib import Path
 from statistics import mean
 
 import click
+from botocore.exceptions import ClientError
 
 from s3duct import __version__
 
@@ -251,6 +252,7 @@ def run_put(
     max_upload_workers: int | None = None,
     expected_size: int | None = None,
     tracker: ProgressTracker | None = None,
+    clobber: bool = False,
 ) -> None:
     """Execute the full put pipeline."""
     if tracker is None:
@@ -304,6 +306,37 @@ def run_put(
     resume_log = ResumeLog(name)
     stream_hasher = StreamHasher()
     prev_chain: bytes | None = None
+
+    # Check if stream already exists (manifest present = completed upload)
+    old_chunk_keys: set[str] | None = None
+    _manifest_key = Manifest.s3_key(name)
+    try:
+        backend.head_object(_manifest_key)
+        # Manifest exists — a previous upload completed with this name
+        if not clobber:
+            raise click.ClickException(
+                f"Stream {name!r} already exists. "
+                "Use --clobber to replace it, or choose a different --name."
+            )
+        # --clobber: read old manifest so we can clean up orphan chunks later
+        tracker.log(f"Stream {name!r} exists, --clobber specified. Reading old manifest...")
+        raw = backend.download_bytes(_manifest_key)
+        from s3duct.downloader import _decrypt_manifest
+        try:
+            old_manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
+            old_chunk_keys = {c.s3_key for c in old_manifest.chunks}
+        except click.ClickException:
+            raise click.ClickException(
+                f"Stream {name!r} exists but its manifest could not be read "
+                "(encrypted or corrupt). Provide the correct --key/--age-identity "
+                "with --clobber, or delete the stream first with 's3duct delete'."
+            )
+        # Clear stale resume log from any previous attempt
+        resume_log.clear()
+    except ClientError as e:
+        if e.response["Error"].get("Code") not in ("404", "NoSuchKey"):
+            raise
+        # Manifest doesn't exist — OK to proceed (fresh or resume)
 
     # Check for resume
     resume_from = -1
@@ -518,6 +551,18 @@ def run_put(
             manifest_bytes = age_encrypt_manifest(manifest_bytes, recipient)
     backend.upload_bytes(manifest_key, manifest_bytes, "STANDARD")
     tracker.log(f"Manifest uploaded to {manifest_key}")
+
+    # Clean up orphaned chunks from previous stream (--clobber)
+    if old_chunk_keys is not None:
+        new_chunk_keys = {c.s3_key for c in manifest.chunks}
+        orphans = old_chunk_keys - new_chunk_keys
+        if orphans:
+            tracker.log(f"Cleaning up {len(orphans)} orphaned chunk(s)...")
+            for key in orphans:
+                try:
+                    backend.delete_object(key)
+                except Exception:
+                    tracker.log(f"  Warning: failed to delete orphan {key}")
 
     # Clean up local resume log
     resume_log.clear()

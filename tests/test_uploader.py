@@ -525,3 +525,137 @@ def test_run_put_age_encrypted_manifest(upload_env, tmp_path):
     assert manifest.encrypted_manifest is True
     assert manifest.encryption_method == "age"
     assert manifest.total_bytes == len(data)
+
+
+# --- Clobber tests ---
+
+
+def test_put_refuses_existing_stream(upload_env):
+    """Uploading to an existing stream name without --clobber fails."""
+    backend, client, scratch, session, mp = upload_env
+
+    # First upload
+    data1 = b"first upload" * 5
+    _mock_stdin(mp, data1)
+    run_put(backend, "clobber-test", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch)
+
+    # Second upload (different data, same name, no clobber)
+    data2 = b"second upload" * 5
+    _mock_stdin(mp, data2)
+    with pytest.raises(Exception) as exc_info:
+        run_put(backend, "clobber-test", chunk_size=CHUNK_SIZE,
+                encrypt=False, scratch_dir=scratch)
+    assert "already exists" in str(exc_info.value)
+    assert "--clobber" in str(exc_info.value)
+
+
+def test_put_clobber_overwrites(upload_env):
+    """--clobber allows overwriting an existing stream."""
+    backend, client, scratch, session, mp = upload_env
+
+    # First upload
+    data1 = b"first upload" * 5
+    _mock_stdin(mp, data1)
+    run_put(backend, "clobber-over", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch)
+
+    # Second upload with clobber
+    data2 = b"second upload different"
+    _mock_stdin(mp, data2)
+    run_put(backend, "clobber-over", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, clobber=True)
+
+    # Verify new manifest
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="clobber-over/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.total_bytes == len(data2)
+
+
+def test_put_clobber_cleans_orphans(upload_env):
+    """--clobber removes orphaned chunks from previous stream."""
+    backend, client, scratch, session, mp = upload_env
+
+    # First upload: 5 chunks
+    data1 = b"x" * (CHUNK_SIZE * 5)
+    _mock_stdin(mp, data1)
+    run_put(backend, "clobber-orphan", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch)
+
+    # Verify 5 chunks exist
+    old_raw = client.get_object(Bucket="test-bucket",
+                                Key="clobber-orphan/.manifest.json")["Body"].read()
+    old_manifest = Manifest.from_json(old_raw)
+    assert old_manifest.chunk_count == 5
+
+    # Second upload: 2 chunks
+    data2 = b"y" * (CHUNK_SIZE * 2)
+    _mock_stdin(mp, data2)
+    run_put(backend, "clobber-orphan", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, clobber=True)
+
+    # Verify new manifest has 2 chunks
+    new_raw = client.get_object(Bucket="test-bucket",
+                                Key="clobber-orphan/.manifest.json")["Body"].read()
+    new_manifest = Manifest.from_json(new_raw)
+    assert new_manifest.chunk_count == 2
+
+    # Old chunks 2,3,4 should be deleted (orphans)
+    for i in range(2, 5):
+        with pytest.raises(client.exceptions.NoSuchKey):
+            client.get_object(Bucket="test-bucket",
+                              Key=f"clobber-orphan/chunk-{i:06d}")
+
+
+def test_put_clobber_unreadable_manifest(upload_env):
+    """--clobber with unreadable manifest gives clear error."""
+    import os
+    backend, client, scratch, session, mp = upload_env
+
+    # First upload: encrypted
+    data1 = b"encrypted upload" * 3
+    aes_key = os.urandom(32)
+    _mock_stdin(mp, data1)
+    run_put(backend, "clobber-enc", chunk_size=CHUNK_SIZE,
+            encrypt=True, encrypt_manifest=True,
+            encryption_method="aes-256-gcm", aes_key=aes_key,
+            scratch_dir=scratch)
+
+    # Second upload: clobber but no key
+    data2 = b"second upload"
+    _mock_stdin(mp, data2)
+    with pytest.raises(Exception) as exc_info:
+        run_put(backend, "clobber-enc", chunk_size=CHUNK_SIZE,
+                encrypt=False, scratch_dir=scratch, clobber=True)
+    assert "could not be read" in str(exc_info.value)
+    assert "delete" in str(exc_info.value).lower()
+
+
+def test_put_resume_no_manifest(upload_env):
+    """Resume works without --clobber when manifest doesn't exist yet."""
+    backend, client, scratch, session, mp = upload_env
+
+    # Create a partial upload (resume log but no manifest)
+    # First, start an upload but simulate it being interrupted before manifest
+    data = b"z" * (CHUNK_SIZE * 3)
+    _mock_stdin(mp, data)
+
+    # Run a complete upload first
+    run_put(backend, "resume-test", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch)
+
+    # Delete just the manifest to simulate interrupted state
+    client.delete_object(Bucket="test-bucket",
+                         Key="resume-test/.manifest.json")
+
+    # Re-upload should work without clobber (no manifest = fresh or resume)
+    _mock_stdin(mp, data)
+    run_put(backend, "resume-test", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch)
+
+    # Verify manifest was created
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="resume-test/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.chunk_count == 3
