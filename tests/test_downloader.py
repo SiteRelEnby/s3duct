@@ -637,3 +637,133 @@ def test_run_delete_encrypted_manifest(download_env):
     # All objects should be gone
     resp = client.list_objects_v2(Bucket="test-bucket", Prefix="del-enc/")
     assert resp.get("KeyCount", 0) == 0
+
+
+# --- parallel download tests ---
+
+
+def test_run_get_parallel_basic(download_env):
+    """Parallel download should produce correct output."""
+    backend, client, scratch, mp = download_env
+    data = b"parallel download test data" * 10
+    _upload_test_stream(client, "par-dl", data)
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(backend, "par-dl", decrypt=False, scratch_dir=scratch, download_workers=4)
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_parallel_ordering(download_env):
+    """Parallel download with many chunks should preserve byte order."""
+    backend, client, scratch, mp = download_env
+    # Create data that spans 7+ chunks to exercise window draining
+    data = bytes(range(256)) * 3  # 768 bytes, 12 chunks at 64 bytes each
+    _upload_test_stream(client, "par-order", data)
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(backend, "par-order", decrypt=False, scratch_dir=scratch, download_workers=3)
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_parallel_cleanup(download_env):
+    """Scratch dir should be empty after parallel download."""
+    backend, client, scratch, mp = download_env
+    data = b"cleanup test" * 20
+    _upload_test_stream(client, "par-clean", data)
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(backend, "par-clean", decrypt=False, scratch_dir=scratch, download_workers=4)
+
+    remaining = list(scratch.iterdir())
+    assert remaining == [], f"Scratch dir not clean: {remaining}"
+
+
+def test_run_get_parallel_encrypted(download_env):
+    """Parallel download with AES encryption should produce correct plaintext."""
+    import os
+    from s3duct.uploader import run_put
+
+    backend, client, scratch, mp = download_env
+    data = b"parallel encrypted download" * 5
+    aes_key = os.urandom(32)
+
+    session = scratch.parent / "sessions"
+    session.mkdir(exist_ok=True)
+    mp.setattr("s3duct.config.SESSION_DIR", session)
+    mp.setattr("s3duct.resume.SESSION_DIR", session)
+
+    stdin_mock = type("MockStdin", (), {"buffer": io.BytesIO(data)})()
+    mp.setattr(sys, "stdin", stdin_mock)
+
+    run_put(
+        backend, "par-enc-dl", chunk_size=CHUNK_SIZE,
+        encrypt=True, encryption_method="aes-256-gcm",
+        aes_key=aes_key, scratch_dir=scratch,
+    )
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(
+        backend, "par-enc-dl", decrypt=True,
+        encryption_method="aes-256-gcm", aes_key=aes_key,
+        scratch_dir=scratch, download_workers=4,
+    )
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_parallel_single_chunk(download_env):
+    """Parallel download with only 1 chunk should work."""
+    backend, client, scratch, mp = download_env
+    data = b"single chunk" * 3  # < 64 bytes = 1 chunk
+    _upload_test_stream(client, "par-single", data)
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(backend, "par-single", decrypt=False, scratch_dir=scratch, download_workers=4)
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_workers_1_sequential(download_env):
+    """workers=1 should produce identical output to default sequential path."""
+    backend, client, scratch, mp = download_env
+    data = b"sequential test" * 10
+    _upload_test_stream(client, "seq-test", data)
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(backend, "seq-test", decrypt=False, scratch_dir=scratch, download_workers=1)
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_parallel_auto(download_env):
+    """workers='auto' should work with adaptive throttle."""
+    backend, client, scratch, mp = download_env
+    data = b"auto workers test" * 20
+    _upload_test_stream(client, "par-auto", data)
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    run_get(backend, "par-auto", decrypt=False, scratch_dir=scratch, download_workers="auto")
+
+    stdout_mock.buffer.seek(0)
+    assert stdout_mock.buffer.read() == data

@@ -180,8 +180,12 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--download-workers", default="auto", help="Parallel download threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
+@click.option("--min-download-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
+@click.option("--max-download-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
-def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_url, retries, summary):
+def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_url, retries,
+        download_workers, min_download_workers, max_download_workers, summary):
     """Download a stream from S3 to stdout."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_get
@@ -201,6 +205,26 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
     elif age_identity:
         encryption_method = "age"
 
+    # Parse download_workers: "auto" or an integer
+    parsed_workers: int | str = download_workers
+    if download_workers != "auto":
+        try:
+            parsed_workers = int(download_workers)
+            if parsed_workers < 1:
+                raise click.ClickException("--download-workers must be >= 1")
+        except ValueError:
+            raise click.ClickException(
+                f"--download-workers must be 'auto' or a positive integer, got: {download_workers!r}"
+            )
+
+    if min_download_workers is not None and download_workers != "auto":
+        raise click.ClickException("--min-download-workers only applies when --download-workers is 'auto'")
+    if max_download_workers is not None and download_workers != "auto":
+        raise click.ClickException("--max-download-workers only applies when --download-workers is 'auto'")
+    if (min_download_workers is not None and max_download_workers is not None
+            and min_download_workers > max_download_workers):
+        raise click.ClickException("--min-download-workers must be <= --max-download-workers")
+
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
     run_get(
@@ -211,6 +235,9 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
         aes_key=aes_key,
         age_identity=age_identity,
         summary=summary,
+        download_workers=parsed_workers,
+        min_download_workers=min_download_workers,
+        max_download_workers=max_download_workers,
     )
 
 

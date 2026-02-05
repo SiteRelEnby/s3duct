@@ -218,6 +218,16 @@ def test_cli_verify_key_and_age_mutual_exclusion(tmp_path):
     assert "mutually exclusive" in result.output
 
 
+def test_cli_get_download_workers():
+    """get command should show --download-workers option."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["get", "--help"])
+    assert result.exit_code == 0
+    assert "--download-workers" in result.output
+    assert "--min-download-workers" in result.output
+    assert "--max-download-workers" in result.output
+
+
 def test_cli_delete_help():
     """delete command should show all expected options."""
     runner = CliRunner()

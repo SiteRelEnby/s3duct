@@ -2,7 +2,12 @@
 
 import json
 import sys
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from statistics import mean
 
 import click
 from botocore.exceptions import ClientError
@@ -12,7 +17,155 @@ from s3duct.backends.base import StorageBackend
 from s3duct.config import SCRATCH_DIR
 from s3duct.encryption import aes_decrypt_file, age_decrypt_file
 from s3duct.integrity import hash_file, compute_chain, DualHash
-from s3duct.manifest import Manifest
+from s3duct.manifest import ChunkRecord, Manifest
+
+# Adaptive worker scaling constants (same defaults as uploader)
+_DL_MAX_POOL_SIZE = 16
+_DL_INITIAL_WORKERS = 4
+_DL_MIN_WORKERS = 2
+_DL_ADJUST_INTERVAL = 3
+
+
+@dataclass
+class _DownloadJob:
+    """A chunk to be downloaded."""
+    index: int
+    chunk_rec: ChunkRecord
+    dest_path: Path
+
+
+@dataclass
+class _DownloadResult:
+    """Result of a completed download + optional decryption."""
+    job: _DownloadJob
+    final_path: Path  # may differ from dest_path after decryption
+    elapsed: float
+
+
+class _DownloadThrottle:
+    """Adaptive concurrency control for parallel downloads.
+
+    Adjusts worker count based on download time vs drain time
+    (verify + stdout write). If downloads are slow relative to drain,
+    we're download-bound and should add workers. If drain is slow
+    (stdout bottleneck), reduce workers.
+    """
+
+    def __init__(self, initial: int = _DL_INITIAL_WORKERS,
+                 min_workers: int = _DL_MIN_WORKERS,
+                 max_workers: int = _DL_MAX_POOL_SIZE) -> None:
+        self._min = max(1, min_workers)
+        self._max = max(self._min, max_workers)
+        self._current = min(max(initial, self._min), self._max)
+        self._semaphore = threading.Semaphore(self._current)
+        self._lock = threading.Lock()
+        self._download_times: list[float] = []
+        self._drain_times: list[float] = []
+        self._completions = 0
+
+    @property
+    def current_workers(self) -> int:
+        return self._current
+
+    def acquire(self) -> None:
+        self._semaphore.acquire()
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+    def record_download_time(self, elapsed: float) -> None:
+        with self._lock:
+            self._download_times.append(elapsed)
+            if len(self._download_times) > 6:
+                self._download_times.pop(0)
+            self._completions += 1
+            if self._completions % _DL_ADJUST_INTERVAL == 0:
+                self._adjust()
+
+    def record_drain_time(self, elapsed: float) -> None:
+        with self._lock:
+            self._drain_times.append(elapsed)
+            if len(self._drain_times) > 6:
+                self._drain_times.pop(0)
+
+    def record_throttle(self) -> None:
+        """Called when S3 returns a throttle/SlowDown error."""
+        with self._lock:
+            if self._current > self._min:
+                try:
+                    self._semaphore.acquire(blocking=False)
+                    self._current -= 1
+                    click.echo(
+                        f"  [auto] workers: {self._current + 1} → {self._current} "
+                        f"(S3 throttle detected)",
+                        err=True,
+                    )
+                except Exception:
+                    pass
+
+    def _adjust(self) -> None:
+        if len(self._download_times) < 2 or len(self._drain_times) < 2:
+            return
+        avg_download = mean(self._download_times)
+        avg_drain = mean(self._drain_times)
+        if avg_drain <= 0:
+            return
+
+        old = self._current
+        if avg_download > 2 * avg_drain and self._current < self._max:
+            self._semaphore.release()
+            self._current += 1
+            click.echo(
+                f"  [auto] workers: {old} → {self._current} "
+                f"(download-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s)",
+                err=True,
+            )
+        elif avg_download < 0.5 * avg_drain and self._current > self._min:
+            try:
+                self._semaphore.acquire(blocking=False)
+                self._current -= 1
+                click.echo(
+                    f"  [auto] workers: {old} → {self._current} "
+                    f"(drain-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s)",
+                    err=True,
+                )
+            except Exception:
+                pass
+
+
+def _download_one(
+    backend: StorageBackend,
+    job: _DownloadJob,
+    decrypt: bool,
+    encrypted: bool,
+    encryption_method: str | None,
+    aes_key: bytes | None,
+    age_identity: str | None,
+    throttle: "_DownloadThrottle | None",
+) -> _DownloadResult:
+    """Download and optionally decrypt a single chunk. Runs in a worker thread."""
+    t0 = time.monotonic()
+    try:
+        backend.download(job.chunk_rec.s3_key, job.dest_path)
+
+        final_path = job.dest_path
+        if decrypt and encrypted:
+            method = encryption_method or "age"
+            dec_path = job.dest_path.with_suffix(".dec")
+            if method == "aes-256-gcm":
+                aes_decrypt_file(job.dest_path, dec_path, aes_key)
+            else:
+                age_decrypt_file(job.dest_path, dec_path, age_identity)
+            job.dest_path.unlink()
+            final_path = dec_path
+
+        elapsed = time.monotonic() - t0
+        if throttle:
+            throttle.record_download_time(elapsed)
+        return _DownloadResult(job=job, final_path=final_path, elapsed=elapsed)
+    finally:
+        if throttle:
+            throttle.release()
 
 
 def _decrypt_manifest(
@@ -61,6 +214,78 @@ def _decrypt_manifest(
     )
 
 
+def _drain_oldest(
+    window: list[tuple[_DownloadJob, Future]],
+    prev_chain: bytes | None,
+    decrypt: bool,
+    encrypted: bool,
+    name: str,
+    throttle: _DownloadThrottle | None,
+) -> bytes | None:
+    """Pop oldest future, verify, write to stdout, cleanup. Returns updated prev_chain."""
+    job, future = window.pop(0)
+    t0 = time.monotonic()
+    try:
+        result: _DownloadResult = future.result()
+    except ClientError as e:
+        code = e.response["Error"].get("Code", "")
+        if code == "InvalidObjectState":
+            raise click.ClickException(
+                f"Chunk {job.index} is archived in Glacier/Deep Archive "
+                f"and not available for download.\n"
+                f"Run 's3duct restore --bucket <bucket> --name {name}' to "
+                f"initiate thaw, then retry."
+            )
+        raise
+    except Exception:
+        job.dest_path.unlink(missing_ok=True)
+        job.dest_path.with_suffix(".dec").unlink(missing_ok=True)
+        raise
+
+    chunk_path = result.final_path
+    chunk_rec = job.chunk_rec
+
+    # Verify integrity (skip in raw/no-decrypt mode)
+    skip_integrity = encrypted and not decrypt
+    if not skip_integrity:
+        dual_hash, size = hash_file(chunk_path)
+        expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
+
+        if dual_hash != expected:
+            chunk_path.unlink(missing_ok=True)
+            raise click.ClickException(
+                f"Integrity check failed for chunk {chunk_rec.index}. "
+                "Data may be corrupt."
+            )
+
+        if size != chunk_rec.size:
+            chunk_path.unlink(missing_ok=True)
+            raise click.ClickException(
+                f"Size mismatch for chunk {chunk_rec.index}: "
+                f"expected {chunk_rec.size}, got {size}"
+            )
+
+        chain_hex = compute_chain(dual_hash, prev_chain)
+        prev_chain = bytes.fromhex(chain_hex)
+
+    # Write to stdout
+    with open(chunk_path, "rb") as f:
+        while True:
+            data = f.read(8 * 1024 * 1024)
+            if not data:
+                break
+            sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+    # Cleanup
+    chunk_path.unlink(missing_ok=True)
+
+    if throttle:
+        throttle.record_drain_time(time.monotonic() - t0)
+
+    return prev_chain
+
+
 def run_get(
     backend: StorageBackend,
     name: str,
@@ -70,6 +295,9 @@ def run_get(
     age_identity: str | None = None,
     scratch_dir: Path | None = None,
     summary: str = "text",  # "text", "json", or "none"
+    download_workers: int | str = 1,
+    min_download_workers: int | None = None,
+    max_download_workers: int | None = None,
 ) -> None:
     """Execute the full get pipeline."""
     backend.preflight_check()
@@ -112,73 +340,151 @@ def run_get(
         err=True,
     )
 
+    # Resolve worker count
+    adaptive = download_workers == "auto"
+    if adaptive:
+        min_w = min_download_workers or _DL_MIN_WORKERS
+        max_w = max_download_workers or _DL_MAX_POOL_SIZE
+        effective_workers = min(max(_DL_INITIAL_WORKERS, min_w), max_w)
+    else:
+        effective_workers = int(download_workers)
+        min_w = effective_workers
+        max_w = effective_workers
+
     prev_chain: bytes | None = None
 
-    for chunk_rec in manifest.chunks:
-        chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
+    if effective_workers > 1 or adaptive:
+        # --- Parallel download path ---
+        throttle = _DownloadThrottle(
+            initial=effective_workers, min_workers=min_w, max_workers=max_w,
+        ) if adaptive else None
 
-        # Download
-        click.echo(f"  Downloading chunk {chunk_rec.index}...", err=True)
+        pool_size = max_w if adaptive else effective_workers
+        window: list[tuple[_DownloadJob, Future]] = []
+        deferred_cleanup: list[Path] = []
+
+        if adaptive:
+            click.echo(
+                f"  (workers: auto ({effective_workers}), range {min_w}-{max_w})",
+                err=True,
+            )
+
+        def _abort_window() -> None:
+            for remaining_job, remaining_future in window:
+                remaining_future.cancel()
+                deferred_cleanup.append(remaining_job.dest_path)
+                deferred_cleanup.append(remaining_job.dest_path.with_suffix(".dec"))
+            window.clear()
+
         try:
-            backend.download(chunk_rec.s3_key, chunk_path)
-        except ClientError as e:
-            code = e.response["Error"].get("Code", "")
-            if code == "InvalidObjectState":
-                raise click.ClickException(
-                    f"Chunk {chunk_rec.index} is archived in Glacier/Deep Archive "
-                    f"and not available for download.\n"
-                    f"Run 's3duct restore --bucket <bucket> --name {name}' to "
-                    f"initiate thaw, then retry."
-                )
-            raise
+            with ThreadPoolExecutor(max_workers=pool_size) as pool:
+                for chunk_rec in manifest.chunks:
+                    chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
+                    job = _DownloadJob(
+                        index=chunk_rec.index,
+                        chunk_rec=chunk_rec,
+                        dest_path=chunk_path,
+                    )
 
-        # Decrypt if needed
-        if decrypt and manifest.encrypted:
-            method = encryption_method or manifest.encryption_method or "age"
-            if method == "aes-256-gcm":
-                dec_path = chunk_path.with_suffix(".dec")
-                aes_decrypt_file(chunk_path, dec_path, aes_key)
-            else:
-                dec_path = chunk_path.with_suffix(".dec")
-                age_decrypt_file(chunk_path, dec_path, age_identity)
-            chunk_path.unlink()
-            chunk_path = dec_path
+                    click.echo(f"  Downloading chunk {chunk_rec.index}...", err=True)
 
-        # Verify integrity (against plaintext hashes) -- skip if raw mode
-        skip_integrity = manifest.encrypted and not decrypt
-        if not skip_integrity:
-            dual_hash, size = hash_file(chunk_path)
-            expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
+                    if throttle:
+                        throttle.acquire()
 
-            if dual_hash != expected:
-                chunk_path.unlink(missing_ok=True)
-                raise click.ClickException(
-                    f"Integrity check failed for chunk {chunk_rec.index}. "
-                    "Data may be corrupt."
-                )
+                    future = pool.submit(
+                        _download_one, backend, job, decrypt,
+                        manifest.encrypted,
+                        encryption_method or manifest.encryption_method,
+                        aes_key, age_identity, throttle,
+                    )
+                    window.append((job, future))
 
-            if size != chunk_rec.size:
-                chunk_path.unlink(missing_ok=True)
-                raise click.ClickException(
-                    f"Size mismatch for chunk {chunk_rec.index}: "
-                    f"expected {chunk_rec.size}, got {size}"
-                )
+                    # Drain when window is full (backpressure)
+                    max_window = throttle.current_workers if throttle else effective_workers
+                    while len(window) >= max_window:
+                        try:
+                            prev_chain = _drain_oldest(
+                                window, prev_chain, decrypt,
+                                manifest.encrypted, name, throttle,
+                            )
+                        except Exception:
+                            _abort_window()
+                            raise
 
-            # Verify chain
-            chain_hex = compute_chain(dual_hash, prev_chain)
-            prev_chain = bytes.fromhex(chain_hex)
+                # Drain remaining
+                while window:
+                    try:
+                        prev_chain = _drain_oldest(
+                            window, prev_chain, decrypt,
+                            manifest.encrypted, name, throttle,
+                        )
+                    except Exception:
+                        _abort_window()
+                        raise
+        finally:
+            for p in deferred_cleanup:
+                p.unlink(missing_ok=True)
+    else:
+        # --- Sequential download path (workers=1) ---
+        for chunk_rec in manifest.chunks:
+            chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
 
-        # Write to stdout
-        with open(chunk_path, "rb") as f:
-            while True:
-                data = f.read(8 * 1024 * 1024)
-                if not data:
-                    break
-                sys.stdout.buffer.write(data)
-        sys.stdout.buffer.flush()
+            click.echo(f"  Downloading chunk {chunk_rec.index}...", err=True)
+            try:
+                backend.download(chunk_rec.s3_key, chunk_path)
+            except ClientError as e:
+                code = e.response["Error"].get("Code", "")
+                if code == "InvalidObjectState":
+                    raise click.ClickException(
+                        f"Chunk {chunk_rec.index} is archived in Glacier/Deep Archive "
+                        f"and not available for download.\n"
+                        f"Run 's3duct restore --bucket <bucket> --name {name}' to "
+                        f"initiate thaw, then retry."
+                    )
+                raise
 
-        # Cleanup
-        chunk_path.unlink(missing_ok=True)
+            if decrypt and manifest.encrypted:
+                method = encryption_method or manifest.encryption_method or "age"
+                if method == "aes-256-gcm":
+                    dec_path = chunk_path.with_suffix(".dec")
+                    aes_decrypt_file(chunk_path, dec_path, aes_key)
+                else:
+                    dec_path = chunk_path.with_suffix(".dec")
+                    age_decrypt_file(chunk_path, dec_path, age_identity)
+                chunk_path.unlink()
+                chunk_path = dec_path
+
+            skip_integrity = manifest.encrypted and not decrypt
+            if not skip_integrity:
+                dual_hash, size = hash_file(chunk_path)
+                expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
+
+                if dual_hash != expected:
+                    chunk_path.unlink(missing_ok=True)
+                    raise click.ClickException(
+                        f"Integrity check failed for chunk {chunk_rec.index}. "
+                        "Data may be corrupt."
+                    )
+
+                if size != chunk_rec.size:
+                    chunk_path.unlink(missing_ok=True)
+                    raise click.ClickException(
+                        f"Size mismatch for chunk {chunk_rec.index}: "
+                        f"expected {chunk_rec.size}, got {size}"
+                    )
+
+                chain_hex = compute_chain(dual_hash, prev_chain)
+                prev_chain = bytes.fromhex(chain_hex)
+
+            with open(chunk_path, "rb") as f:
+                while True:
+                    data = f.read(8 * 1024 * 1024)
+                    if not data:
+                        break
+                    sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+
+            chunk_path.unlink(missing_ok=True)
 
     # Verify final chain (skip in raw/no-decrypt mode)
     raw_mode = manifest.encrypted and not decrypt
@@ -186,6 +492,7 @@ def run_get(
         if prev_chain.hex() != manifest.final_chain:
             raise click.ClickException("Final chain mismatch. Stream may be incomplete or tampered.")
 
+    workers_label = f"auto ({throttle.current_workers})" if adaptive and throttle else str(effective_workers)
     if summary == "json":
         report = {
             "version": __version__,
@@ -202,7 +509,10 @@ def run_get(
         }
         click.echo(json.dumps(report), err=True)
     elif summary == "text":
-        click.echo("Restore complete.", err=True)
+        if effective_workers > 1 or adaptive:
+            click.echo(f"Restore complete. (workers: {workers_label})", err=True)
+        else:
+            click.echo("Restore complete.", err=True)
 
 
 def run_list(backend: StorageBackend, prefix: str = "") -> None:
