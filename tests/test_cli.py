@@ -253,3 +253,51 @@ def test_cli_delete_key_and_age_mutual_exclusion(tmp_path):
     ])
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
+
+
+def test_cli_put_progress_option():
+    """put command should accept --progress."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--progress" in result.output
+
+
+def test_cli_put_expected_size_option():
+    """put command should accept --expected-size."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--expected-size" in result.output
+
+
+def test_cli_get_progress_option():
+    """get command should accept --progress."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["get", "--help"])
+    assert result.exit_code == 0
+    assert "--progress" in result.output
+
+
+def test_cli_verify_progress_option():
+    """verify command should accept --progress."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["verify", "--help"])
+    assert result.exit_code == 0
+    assert "--progress" in result.output
+
+
+def test_cli_delete_progress_option():
+    """delete command should accept --progress."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["delete", "--help"])
+    assert result.exit_code == 0
+    assert "--progress" in result.output
+
+
+def test_cli_restore_progress_option():
+    """restore command should accept --progress."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["restore", "--help"])
+    assert result.exit_code == 0
+    assert "--progress" in result.output

@@ -18,6 +18,7 @@ from s3duct.config import SCRATCH_DIR
 from s3duct.encryption import aes_decrypt_file, age_decrypt_file
 from s3duct.integrity import hash_file, compute_chain, DualHash
 from s3duct.manifest import ChunkRecord, Manifest
+from s3duct.progress import ProgressTracker, PlainProgress
 
 # Adaptive worker scaling constants (same defaults as uploader)
 _DL_MAX_POOL_SIZE = 16
@@ -53,7 +54,8 @@ class _DownloadThrottle:
 
     def __init__(self, initial: int = _DL_INITIAL_WORKERS,
                  min_workers: int = _DL_MIN_WORKERS,
-                 max_workers: int = _DL_MAX_POOL_SIZE) -> None:
+                 max_workers: int = _DL_MAX_POOL_SIZE,
+                 tracker: ProgressTracker | None = None) -> None:
         self._min = max(1, min_workers)
         self._max = max(self._min, max_workers)
         self._current = min(max(initial, self._min), self._max)
@@ -62,6 +64,7 @@ class _DownloadThrottle:
         self._download_times: list[float] = []
         self._drain_times: list[float] = []
         self._completions = 0
+        self._tracker = tracker
 
     @property
     def current_workers(self) -> int:
@@ -94,12 +97,10 @@ class _DownloadThrottle:
             if self._current > self._min:
                 try:
                     self._semaphore.acquire(blocking=False)
+                    old = self._current + 1
                     self._current -= 1
-                    click.echo(
-                        f"  [auto] workers: {self._current + 1} → {self._current} "
-                        f"(S3 throttle detected)",
-                        err=True,
-                    )
+                    if self._tracker:
+                        self._tracker.update_workers(old, self._current, "S3 throttle detected")
                 except Exception:
                     pass
 
@@ -115,20 +116,20 @@ class _DownloadThrottle:
         if avg_download > 2 * avg_drain and self._current < self._max:
             self._semaphore.release()
             self._current += 1
-            click.echo(
-                f"  [auto] workers: {old} → {self._current} "
-                f"(download-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s)",
-                err=True,
-            )
+            if self._tracker:
+                self._tracker.update_workers(
+                    old, self._current,
+                    f"download-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s",
+                )
         elif avg_download < 0.5 * avg_drain and self._current > self._min:
             try:
                 self._semaphore.acquire(blocking=False)
                 self._current -= 1
-                click.echo(
-                    f"  [auto] workers: {old} → {self._current} "
-                    f"(drain-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s)",
-                    err=True,
-                )
+                if self._tracker:
+                    self._tracker.update_workers(
+                        old, self._current,
+                        f"drain-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s",
+                    )
             except Exception:
                 pass
 
@@ -221,6 +222,7 @@ def _drain_oldest(
     encrypted: bool,
     name: str,
     throttle: _DownloadThrottle | None,
+    tracker: ProgressTracker | None = None,
 ) -> bytes | None:
     """Pop oldest future, verify, write to stdout, cleanup. Returns updated prev_chain."""
     job, future = window.pop(0)
@@ -280,6 +282,9 @@ def _drain_oldest(
     # Cleanup
     chunk_path.unlink(missing_ok=True)
 
+    if tracker:
+        tracker.update_chunk(job.chunk_rec.index, job.chunk_rec.size)
+
     if throttle:
         throttle.record_drain_time(time.monotonic() - t0)
 
@@ -298,8 +303,12 @@ def run_get(
     download_workers: int | str = 1,
     min_download_workers: int | None = None,
     max_download_workers: int | None = None,
+    tracker: ProgressTracker | None = None,
 ) -> None:
     """Execute the full get pipeline."""
+    if tracker is None:
+        tracker = PlainProgress()
+
     backend.preflight_check()
 
     if scratch_dir is None:
@@ -308,7 +317,7 @@ def run_get(
 
     # Download manifest
     manifest_key = Manifest.s3_key(name)
-    click.echo(f"Downloading manifest...", err=True)
+    tracker.log("Downloading manifest...")
     raw = backend.download_bytes(manifest_key)
 
     # Decrypt manifest if needed (validates key/identity early)
@@ -317,15 +326,9 @@ def run_get(
     if manifest.encrypted and not decrypt:
         method = manifest.encryption_method or "age"
         if method == "aes-256-gcm":
-            click.echo(
-                "Warning: stream was encrypted with AES-256-GCM. Use --key to decrypt.",
-                err=True,
-            )
+            tracker.log("Warning: stream was encrypted with AES-256-GCM. Use --key to decrypt.")
         else:
-            click.echo(
-                "Warning: stream was encrypted with age. Use --age-identity to decrypt.",
-                err=True,
-            )
+            tracker.log("Warning: stream was encrypted with age. Use --age-identity to decrypt.")
 
     # Auto-detect encryption method from manifest
     if decrypt and manifest.encrypted:
@@ -335,10 +338,7 @@ def run_get(
         if method == "age" and not age_identity:
             raise click.ClickException("--age-identity required to decrypt age encrypted stream")
 
-    click.echo(
-        f"Restoring {manifest.chunk_count} chunks, {manifest.total_bytes:,} bytes...",
-        err=True,
-    )
+    tracker.start(manifest.total_bytes, manifest.chunk_count, "Downloading")
 
     # Resolve worker count
     adaptive = download_workers == "auto"
@@ -357,6 +357,7 @@ def run_get(
         # --- Parallel download path ---
         throttle = _DownloadThrottle(
             initial=effective_workers, min_workers=min_w, max_workers=max_w,
+            tracker=tracker,
         ) if adaptive else None
 
         pool_size = max_w if adaptive else effective_workers
@@ -364,10 +365,7 @@ def run_get(
         deferred_cleanup: list[Path] = []
 
         if adaptive:
-            click.echo(
-                f"  (workers: auto ({effective_workers}), range {min_w}-{max_w})",
-                err=True,
-            )
+            tracker.log(f"  (workers: auto ({effective_workers}), range {min_w}-{max_w})")
 
         def _abort_window() -> None:
             for remaining_job, remaining_future in window:
@@ -385,8 +383,6 @@ def run_get(
                         chunk_rec=chunk_rec,
                         dest_path=chunk_path,
                     )
-
-                    click.echo(f"  Downloading chunk {chunk_rec.index}...", err=True)
 
                     if throttle:
                         throttle.acquire()
@@ -406,6 +402,7 @@ def run_get(
                             prev_chain = _drain_oldest(
                                 window, prev_chain, decrypt,
                                 manifest.encrypted, name, throttle,
+                                tracker=tracker,
                             )
                         except Exception:
                             _abort_window()
@@ -417,6 +414,7 @@ def run_get(
                         prev_chain = _drain_oldest(
                             window, prev_chain, decrypt,
                             manifest.encrypted, name, throttle,
+                            tracker=tracker,
                         )
                     except Exception:
                         _abort_window()
@@ -429,7 +427,6 @@ def run_get(
         for chunk_rec in manifest.chunks:
             chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
 
-            click.echo(f"  Downloading chunk {chunk_rec.index}...", err=True)
             try:
                 backend.download(chunk_rec.s3_key, chunk_path)
             except ClientError as e:
@@ -485,6 +482,7 @@ def run_get(
             sys.stdout.buffer.flush()
 
             chunk_path.unlink(missing_ok=True)
+            tracker.update_chunk(chunk_rec.index, chunk_rec.size)
 
     # Verify final chain (skip in raw/no-decrypt mode)
     raw_mode = manifest.encrypted and not decrypt
@@ -508,11 +506,14 @@ def run_get(
             "encryption_method": manifest.encryption_method,
         }
         click.echo(json.dumps(report), err=True)
+        tracker.finish()
     elif summary == "text":
         if effective_workers > 1 or adaptive:
-            click.echo(f"Restore complete. (workers: {workers_label})", err=True)
+            tracker.finish(f"Restore complete. (workers: {workers_label})")
         else:
-            click.echo("Restore complete.", err=True)
+            tracker.finish("Restore complete.")
+    else:
+        tracker.finish()
 
 
 def run_list(backend: StorageBackend, prefix: str = "") -> None:
@@ -555,12 +556,16 @@ def run_delete(
     dry_run: bool = False,
     aes_key: bytes | None = None,
     age_identity: str | None = None,
+    tracker: ProgressTracker | None = None,
 ) -> None:
     """Delete a stream (all chunks + manifest)."""
+    if tracker is None:
+        tracker = PlainProgress()
+
     backend.preflight_check()
 
     manifest_key = Manifest.s3_key(name)
-    click.echo(f"Downloading manifest...", err=True)
+    tracker.log("Downloading manifest...")
     raw = backend.download_bytes(manifest_key)
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
@@ -569,22 +574,22 @@ def run_delete(
     keys_to_delete.append(manifest_key)
 
     if dry_run:
-        click.echo(f"Would delete {len(keys_to_delete)} objects:", err=True)
+        tracker.log(f"Would delete {len(keys_to_delete)} objects:")
         for key in keys_to_delete:
-            click.echo(f"  {key}", err=True)
+            tracker.log(f"  {key}")
         return
 
-    click.echo(f"Deleting {len(keys_to_delete)} objects...", err=True)
+    tracker.start(None, len(keys_to_delete), "Deleting")
     deleted = 0
-    for key in keys_to_delete:
+    for i, key in enumerate(keys_to_delete):
         try:
             backend.delete_object(key)
             deleted += 1
-            click.echo(f"  Deleted {key}", err=True)
+            tracker.update_chunk(i, 0)
         except Exception as e:
-            click.echo(f"  Failed to delete {key}: {e}", err=True)
+            tracker.log(f"  Failed to delete {key}: {e}")
 
-    click.echo(f"Done. Deleted {deleted}/{len(keys_to_delete)} objects.", err=True)
+    tracker.finish(f"Done. Deleted {deleted}/{len(keys_to_delete)} objects.")
 
 
 def run_verify(
@@ -593,8 +598,12 @@ def run_verify(
     aes_key: bytes | None = None,
     age_identity: str | None = None,
     summary: str = "text",  # "text", "json", or "none"
+    tracker: ProgressTracker | None = None,
 ) -> None:
     """Verify integrity of a stored stream without downloading chunk data."""
+    if tracker is None:
+        tracker = PlainProgress()
+
     backend.preflight_check()
 
     manifest_key = Manifest.s3_key(name)
@@ -602,7 +611,7 @@ def run_verify(
 
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
-    click.echo(f"Verifying {manifest.chunk_count} chunks...", err=True)
+    tracker.start(None, manifest.chunk_count, "Verifying")
     errors = 0
     mismatches = []
     missing = []
@@ -611,13 +620,13 @@ def run_verify(
         try:
             info = backend.head_object(chunk_rec.s3_key)
             if info.etag != chunk_rec.etag:
-                click.echo(f"  MISMATCH chunk {chunk_rec.index}: ETag differs", err=True)
+                tracker.log(f"  MISMATCH chunk {chunk_rec.index}: ETag differs")
                 mismatches.append(chunk_rec.index)
                 errors += 1
             else:
-                click.echo(f"  OK chunk {chunk_rec.index}", err=True)
+                tracker.update_chunk(chunk_rec.index, chunk_rec.size)
         except Exception as e:
-            click.echo(f"  MISSING chunk {chunk_rec.index}: {e}", err=True)
+            tracker.log(f"  MISSING chunk {chunk_rec.index}: {e}")
             missing.append(chunk_rec.index)
             errors += 1
 
@@ -632,11 +641,14 @@ def run_verify(
             "chunks_missing": missing,
             "errors": errors,
         }), err=True)
+        tracker.finish()
     elif summary == "text":
         if errors:
-            click.echo(f"Verification failed: {errors} error(s).", err=True)
+            tracker.finish(f"Verification failed: {errors} error(s).")
         else:
-            click.echo("All chunks verified.", err=True)
+            tracker.finish("All chunks verified.")
+    else:
+        tracker.finish()
 
     if errors:
         raise SystemExit(1)

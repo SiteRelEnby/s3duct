@@ -27,6 +27,7 @@ from s3duct.encryption import (
 )
 from s3duct.integrity import DualHash, StreamHasher, compute_chain
 from s3duct.manifest import ChunkRecord, Manifest
+from s3duct.progress import ProgressTracker, PlainProgress
 from s3duct.resume import ResumeEntry, ResumeLog
 
 # Adaptive worker scaling constants
@@ -146,7 +147,8 @@ class _AdaptiveThrottle:
 
     def __init__(self, initial: int = INITIAL_WORKERS,
                  min_workers: int = MIN_WORKERS,
-                 max_workers: int = MAX_POOL_SIZE) -> None:
+                 max_workers: int = MAX_POOL_SIZE,
+                 tracker: ProgressTracker | None = None) -> None:
         self._min = max(1, min_workers)
         self._max = max(self._min, max_workers)
         self._current = min(max(initial, self._min), self._max)
@@ -155,6 +157,7 @@ class _AdaptiveThrottle:
         self._upload_times: list[float] = []
         self._read_times: list[float] = []
         self._completions = 0
+        self._tracker = tracker
 
     @property
     def current_workers(self) -> int:
@@ -189,12 +192,10 @@ class _AdaptiveThrottle:
             if self._current > self._min:
                 try:
                     self._semaphore.acquire(blocking=False)
+                    old = self._current + 1
                     self._current -= 1
-                    click.echo(
-                        f"  [auto] workers: {self._current + 1} → {self._current} "
-                        f"(S3 throttle detected)",
-                        err=True,
-                    )
+                    if self._tracker:
+                        self._tracker.update_workers(old, self._current, "S3 throttle detected")
                 except Exception:
                     pass
 
@@ -211,20 +212,20 @@ class _AdaptiveThrottle:
         if avg_upload > 2 * avg_read and self._current < self._max:
             self._semaphore.release()
             self._current += 1
-            click.echo(
-                f"  [auto] workers: {old} → {self._current} "
-                f"(upload-bound, avg upload {avg_upload:.1f}s vs read {avg_read:.1f}s)",
-                err=True,
-            )
+            if self._tracker:
+                self._tracker.update_workers(
+                    old, self._current,
+                    f"upload-bound, avg upload {avg_upload:.1f}s vs read {avg_read:.1f}s",
+                )
         elif avg_upload < 0.5 * avg_read and self._current > self._min:
             try:
                 self._semaphore.acquire(blocking=False)
                 self._current -= 1
-                click.echo(
-                    f"  [auto] workers: {old} → {self._current} "
-                    f"(read-bound, avg upload {avg_upload:.1f}s vs read {avg_read:.1f}s)",
-                    err=True,
-                )
+                if self._tracker:
+                    self._tracker.update_workers(
+                        old, self._current,
+                        f"read-bound, avg upload {avg_upload:.1f}s vs read {avg_read:.1f}s",
+                    )
             except Exception:
                 pass
 
@@ -248,8 +249,13 @@ def run_put(
     upload_workers: int | str = "auto",  # int for fixed, "auto" for adaptive
     min_upload_workers: int | None = None,
     max_upload_workers: int | None = None,
+    expected_size: int | None = None,
+    tracker: ProgressTracker | None = None,
 ) -> None:
     """Execute the full put pipeline."""
+    if tracker is None:
+        tracker = PlainProgress()
+
     # Verify credentials and bucket access before reading any stdin
     backend.preflight_check()
 
@@ -303,13 +309,12 @@ def run_put(
     resume_from = -1
     if resume_log.last_chunk_index >= 0:
         if not resume_log.verify_chain():
-            click.echo("Resume log chain verification failed. Starting fresh.", err=True)
+            tracker.log("Resume log chain verification failed. Starting fresh.")
             resume_log.clear()
         else:
-            click.echo(
+            tracker.log(
                 f"Found resume log with {resume_log.last_chunk_index + 1} completed chunks. "
                 "Verifying stream...",
-                err=True,
             )
             # Fast-forward through already-uploaded chunks
             ff_count = resume_log.last_chunk_index + 1
@@ -318,10 +323,9 @@ def run_put(
                 sys.stdin.buffer, chunk_size, ff_count, stream_hasher
             ):
                 if not resume_log.verify_entry(idx, dual_hash, size):
-                    click.echo(
+                    tracker.log(
                         f"Stream mismatch at chunk {idx}. "
                         "This is a different stream. Starting fresh.",
-                        err=True,
                     )
                     resume_log.clear()
                     # Can't rewind stdin - must abort
@@ -329,7 +333,7 @@ def run_put(
                         "Cannot resume: stream does not match resume log. "
                         "Please re-run with the original stream from the beginning."
                     )
-                click.echo(f"  Verified chunk {idx}", err=True)
+                tracker.log(f"  Verified chunk {idx}")
                 ff_verified += 1
 
             if ff_verified < ff_count:
@@ -344,11 +348,11 @@ def run_put(
                         f"WARNING: {msg} Aborting (--strict-resume is enabled)."
                     )
                 warnings.append(msg)
-                click.echo(f"WARNING: {msg}", err=True)
+                tracker.log(f"WARNING: {msg}")
 
             resume_from = resume_log.last_chunk_index
             prev_chain = resume_log.get_last_chain_bytes()
-            click.echo(f"Resuming from chunk {resume_from + 1}", err=True)
+            tracker.log(f"Resuming from chunk {resume_from + 1}")
 
     manifest = Manifest.new(
         name=name,
@@ -374,8 +378,14 @@ def run_put(
 
     chunks_uploaded = resume_log.last_chunk_index + 1
 
+    # Resolve total size for progress bar
+    total_size = expected_size or expected_stdin_size
+
+    # Start progress tracking
+    tracker.start(total_size, 0, "Uploading")
+
     # Set up adaptive throttle or fixed pool
-    throttle = _AdaptiveThrottle(effective_workers, user_min, user_max) if adaptive else None
+    throttle = _AdaptiveThrottle(effective_workers, user_min, user_max, tracker=tracker) if adaptive else None
     pool_size = user_max if adaptive else effective_workers
     window: list[tuple[UploadJob, Future]] = []
     # Files to clean up after pool shutdown (deferred to avoid deleting files
@@ -437,10 +447,7 @@ def run_put(
                     chain_hex=chain_hex,
                 )
 
-                click.echo(
-                    f"Uploading chunk {chunk_info_index} ({chunk_info.size:,} bytes)...",
-                    err=True,
-                )
+                tracker.update_chunk(chunk_info_index, chunk_info.size)
 
                 # Acquire throttle slot if adaptive
                 if throttle:
@@ -490,7 +497,7 @@ def run_put(
             p.unlink(missing_ok=True)
 
     if chunks_uploaded == 0:
-        click.echo("No data received on stdin.", err=True)
+        tracker.finish("No data received on stdin.")
         return
 
     # Finalize manifest
@@ -510,7 +517,7 @@ def run_put(
             from s3duct.encryption import age_encrypt_manifest
             manifest_bytes = age_encrypt_manifest(manifest_bytes, recipient)
     backend.upload_bytes(manifest_key, manifest_bytes, "STANDARD")
-    click.echo(f"Manifest uploaded to {manifest_key}", err=True)
+    tracker.log(f"Manifest uploaded to {manifest_key}")
 
     # Clean up local resume log
     resume_log.clear()
@@ -523,7 +530,7 @@ def run_put(
             f"The file may have been modified during upload."
         )
         warnings.append(msg)
-        click.echo(f"WARNING: {msg}", err=True)
+        tracker.log(f"WARNING: {msg}")
 
     chunks_resumed = max(0, resume_from + 1) if resume_from >= 0 else 0
 
@@ -554,8 +561,9 @@ def run_put(
             f"auto ({throttle.current_workers})" if throttle
             else str(effective_workers)
         )
-        click.echo(
+        tracker.finish(
             f"Done. {chunks_uploaded} chunks, {manifest.total_bytes:,} bytes total. "
             f"(workers: {worker_info})",
-            err=True,
         )
+    else:
+        tracker.finish()
