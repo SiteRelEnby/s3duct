@@ -78,6 +78,7 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--scratch-dir", type=click.Path(), default=None, help="Directory for temporary chunk files (default: ~/.s3duct/scratch).")
 @click.option("--diskspace-limit", default=None, help="Max scratch disk usage (e.g., 2G). Must be >= chunk-size.")
 @click.option("--buffer-chunks", default=None, type=int, help="Max buffered chunks in scratch (default: auto).")
 @click.option("--strict-resume/--no-strict-resume", default=True, help="Fail if stdin ends before all resume-log chunks are re-verified (default: on).")
@@ -91,9 +92,9 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifest,
-        tag, storage_class, region, prefix, endpoint_url, diskspace_limit, buffer_chunks,
-        strict_resume, retries, upload_workers, min_upload_workers, max_upload_workers,
-        expected_size, clobber, progress_mode, verbose, summary):
+        tag, storage_class, region, prefix, endpoint_url, scratch_dir, diskspace_limit,
+        buffer_chunks, strict_resume, retries, upload_workers, min_upload_workers,
+        max_upload_workers, expected_size, clobber, progress_mode, verbose, summary):
     """Upload a stream from stdin to S3."""
     from s3duct.encryption import parse_key
     from s3duct.uploader import run_put
@@ -178,6 +179,9 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 
     parsed_expected = parse_size(expected_size) if expected_size else None
 
+    from pathlib import Path
+    parsed_scratch = Path(scratch_dir) if scratch_dir else None
+
     run_put(
         backend=backend,
         name=name,
@@ -188,6 +192,7 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
         aes_key=aes_key,
         age_identity=age_identity,
         storage_class=storage_class,
+        scratch_dir=parsed_scratch,
         diskspace_limit=parsed_limit,
         buffer_chunks=buffer_chunks,
         tags=tags or None,
@@ -211,6 +216,7 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--scratch-dir", type=click.Path(), default=None, help="Directory for temporary chunk files (default: ~/.s3duct/scratch).")
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--download-workers", default="auto", help="Parallel download threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
 @click.option("--min-download-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
@@ -218,8 +224,9 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
-def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_url, retries,
-        download_workers, min_download_workers, max_download_workers, progress_mode, verbose, summary):
+def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_url, scratch_dir,
+        retries, download_workers, min_download_workers, max_download_workers, progress_mode,
+        verbose, summary):
     """Download a stream from S3 to stdout."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_get
@@ -259,8 +266,10 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
             and min_download_workers > max_download_workers):
         raise click.ClickException("--min-download-workers must be <= --max-download-workers")
 
+    from pathlib import Path
     from s3duct.progress import get_tracker
     tracker = get_tracker(progress_mode, verbose=verbose)
+    parsed_scratch = Path(scratch_dir) if scratch_dir else None
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
@@ -271,6 +280,7 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
         encryption_method=encryption_method,
         aes_key=aes_key,
         age_identity=age_identity,
+        scratch_dir=parsed_scratch,
         summary=summary,
         download_workers=parsed_workers,
         min_download_workers=min_download_workers,

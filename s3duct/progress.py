@@ -78,8 +78,8 @@ class RichProgress(ProgressTracker):
         from rich.console import Console
         from rich.progress import (
             BarColumn,
-            DownloadColumn,
             Progress,
+            ProgressColumn,
             SpinnerColumn,
             TextColumn,
             TimeElapsedColumn,
@@ -87,12 +87,21 @@ class RichProgress(ProgressTracker):
             TransferSpeedColumn,
         )
 
+        # Create a proper ProgressColumn subclass
+        class SmartBytesColumn(ProgressColumn):
+            def render(self, task) -> str:
+                completed = int(task.completed) if task.completed else 0
+                total = int(task.total) if task.total else 0
+                if total:
+                    return f"{_format_bytes(completed)} / {_format_bytes(total)}"
+                return _format_bytes(completed)
+
         self._console = Console(stderr=True)
         self._progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
             BarColumn(),
-            DownloadColumn(),
+            SmartBytesColumn(),
             TransferSpeedColumn(),
             TimeRemainingColumn(),
             TimeElapsedColumn(),
@@ -102,9 +111,24 @@ class RichProgress(ProgressTracker):
         self._task_id = None
         self._started = False
         self._workers = 0
+        self._label = ""
+        self._staged = 0
+        self._completed = 0
+
+    def _update_description(self) -> None:
+        """Update task description with in-flight count."""
+        if self._task_id is None:
+            return
+        in_flight = self._staged - self._completed
+        if in_flight > 0:
+            desc = f"{self._label} ({in_flight} in-flight)"
+        else:
+            desc = self._label
+        self._progress.update(self._task_id, description=desc)
 
     def start(self, total_bytes: int | None, total_chunks: int, label: str,
               chunk_size: int | None = None) -> None:
+        self._label = label
         self._progress.start()
         self._started = True
         self._task_id = self._progress.add_task(
@@ -113,11 +137,14 @@ class RichProgress(ProgressTracker):
         )
 
     def update_chunk(self, index: int, size: int, elapsed: float | None = None) -> None:
+        self._completed += 1
         if self._task_id is not None:
             self._progress.update(self._task_id, advance=size)
+        self._update_description()
 
     def chunk_staged(self, index: int, size: int) -> None:
-        pass  # Not shown in simple progress bar
+        self._staged += 1
+        self._update_description()
 
     def update_workers(self, old: int, new: int, reason: str) -> None:
         self._workers = new
@@ -279,6 +306,16 @@ class RichVerboseProgress(ProgressTracker):
         table.add_row(" | ".join(parts))
         return table
 
+    def _render_progress_bar(self) -> str:
+        """Render a text-based progress bar."""
+        if not self._total_bytes or self._total_bytes == 0:
+            return ""
+        pct = min(100, (self._bytes_completed / self._total_bytes) * 100)
+        bar_width = 40
+        filled = int(bar_width * pct / 100)
+        bar = "█" * filled + "░" * (bar_width - filled)
+        return f"[green]{bar}[/green] {pct:5.1f}%"
+
     def _render(self) -> "Table":
         from rich.table import Table
 
@@ -297,6 +334,11 @@ class RichVerboseProgress(ProgressTracker):
             else:
                 in_flight_str = ", ".join(str(c) for c in chunks[:6]) + f", ... +{len(chunks) - 6} more"
             table.add_row(f"[yellow]In-flight:[/yellow] {in_flight_str}")
+
+        # Progress bar (if total is known)
+        progress_bar = self._render_progress_bar()
+        if progress_bar:
+            table.add_row(progress_bar)
 
         # Stats line
         table.add_row(self._render_stats())

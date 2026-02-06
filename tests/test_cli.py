@@ -374,3 +374,19 @@ def test_cli_completion_fish():
     result = runner.invoke(main, ["completion", "fish"])
     assert result.exit_code == 0
     assert "_s3duct_completion" in result.output
+
+
+def test_cli_put_scratch_dir_option():
+    """put command should accept --scratch-dir."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--scratch-dir" in result.output
+
+
+def test_cli_get_scratch_dir_option():
+    """get command should accept --scratch-dir."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["get", "--help"])
+    assert result.exit_code == 0
+    assert "--scratch-dir" in result.output

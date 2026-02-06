@@ -290,6 +290,7 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--no-encrypt` | | Disable encryption even if key/identity provided |
 | `--encrypt-manifest/--no-encrypt-manifest` | on when encrypted | Encrypt manifest with same key/identity as chunks |
 | `--clobber` | | Overwrite existing stream (fails by default if stream exists) |
+| `--scratch-dir` | `~/.s3duct/scratch` | Directory for temporary chunk files |
 | `--tag` | | Custom metadata tag (`key=value`, repeatable) |
 | `--storage-class` | `STANDARD` | S3 storage class |
 | `--region` | | AWS region |
@@ -319,6 +320,7 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--scratch-dir` | `~/.s3duct/scratch` | Directory for temporary chunk files |
 | `--retries` | `10` | Max retry attempts per S3 operation |
 | `--download-workers` | `1` | Parallel download threads (`auto` or integer) |
 | `--min-download-workers` | `2` | Minimum workers for auto mode |
