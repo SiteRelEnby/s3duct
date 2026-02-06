@@ -349,3 +349,28 @@ def test_cli_restore_verbose_option():
     result = runner.invoke(main, ["restore", "--help"])
     assert result.exit_code == 0
     assert "--verbose" in result.output or "-v" in result.output
+
+
+def test_cli_completion_bash():
+    """completion bash should output shell script."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["completion", "bash"])
+    assert result.exit_code == 0
+    assert "_s3duct_completion" in result.output
+    assert "COMP_WORDS" in result.output
+
+
+def test_cli_completion_zsh():
+    """completion zsh should output shell script."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["completion", "zsh"])
+    assert result.exit_code == 0
+    assert "#compdef s3duct" in result.output
+
+
+def test_cli_completion_fish():
+    """completion fish should output shell script."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["completion", "fish"])
+    assert result.exit_code == 0
+    assert "_s3duct_completion" in result.output

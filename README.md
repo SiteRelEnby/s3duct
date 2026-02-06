@@ -31,7 +31,24 @@ verification, optional encryption, cache management, and automatic resume on fai
 pip install s3duct
 ```
 
-For development:
+### Shell Completion
+
+Enable tab completion for commands and options:
+
+```bash
+# Bash (~/.bashrc)
+s3duct completion bash >> ~/.bashrc
+
+# Zsh (~/.zshrc)
+s3duct completion zsh >> ~/.zshrc
+
+# Fish (~/.config/fish/completions/s3duct.fish)
+s3duct completion fish > ~/.config/fish/completions/s3duct.fish
+```
+
+Then restart your shell or source the file.
+
+### Development
 
 ```bash
 git clone https://github.com/SiteRelEnby/s3duct
@@ -231,9 +248,21 @@ Note: the manifest is always uploaded as `STANDARD` so it remains immediately
 accessible regardless of the chunk storage class.
 
 **Glacier/Deep Archive retrieval:** chunks stored in Glacier or Deep Archive
-cannot be downloaded directly. You must first restore (thaw) the objects using
-the AWS CLI or console, then run `s3duct get` once the restore completes.
-Automated thaw support is planned.
+cannot be downloaded directly. Use `s3duct restore` to initiate the thaw:
+
+```bash
+# Start restore (Standard tier, 7 days)
+s3duct restore --bucket mybucket --name archive
+
+# Wait for completion (polls every 60s)
+s3duct restore --bucket mybucket --name archive --wait
+
+# Faster restore (higher cost)
+s3duct restore --bucket mybucket --name archive --tier Expedited
+
+# Then download once restored
+s3duct get --bucket mybucket --name archive > data.tar.gz
+```
 
 ### S3-compatible endpoints
 
@@ -260,11 +289,13 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--age-identity` | | Path to age identity file (mutually exclusive with `--key`) |
 | `--no-encrypt` | | Disable encryption even if key/identity provided |
 | `--encrypt-manifest/--no-encrypt-manifest` | on when encrypted | Encrypt manifest with same key/identity as chunks |
+| `--clobber` | | Overwrite existing stream (fails by default if stream exists) |
 | `--tag` | | Custom metadata tag (`key=value`, repeatable) |
 | `--storage-class` | `STANDARD` | S3 storage class |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--expected-size` | | Expected stream size (warns if actual is shorter) |
 | `--diskspace-limit` | auto | Max scratch disk usage (e.g., `2G`) |
 | `--buffer-chunks` | auto | Max buffered chunks before backpressure |
 | `--strict-resume/--no-strict-resume` | on | Fail if stdin ends before all resume-log chunks are re-verified |
@@ -272,6 +303,8 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--upload-workers` | `auto` | Parallel upload threads (`auto` adapts based on throughput, or an integer for fixed concurrency) |
 | `--min-upload-workers` | `2` | Minimum workers for auto mode |
 | `--max-upload-workers` | `16` | Maximum workers for auto mode |
+| `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
+| `--verbose` | | Show detailed progress events and timing |
 | `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct get`
@@ -287,6 +320,11 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
 | `--retries` | `10` | Max retry attempts per S3 operation |
+| `--download-workers` | `1` | Parallel download threads (`auto` or integer) |
+| `--min-download-workers` | `2` | Minimum workers for auto mode |
+| `--max-download-workers` | `16` | Maximum workers for auto mode |
+| `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
+| `--verbose` | | Show detailed progress events and timing |
 | `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct list`
@@ -310,7 +348,44 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
 | `--retries` | `10` | Max retry attempts per S3 operation |
+| `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
+| `--verbose` | | Show detailed progress events and timing |
 | `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
+
+### `s3duct delete`
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bucket` | (required) | S3 bucket name |
+| `--name` | (required) | Stream name to delete |
+| `--key` | | AES-256-GCM key (required if manifest is encrypted with AES) |
+| `--age-identity` | | Path to age identity file (required if manifest is encrypted with age) |
+| `--dry-run` | | Show what would be deleted without deleting |
+| `--force` | | Skip confirmation prompt |
+| `--region` | | AWS region |
+| `--prefix` | | S3 key prefix |
+| `--endpoint-url` | | Custom S3 endpoint URL |
+| `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
+| `--verbose` | | Show detailed progress events and timing |
+
+### `s3duct restore`
+
+Initiate Glacier/Deep Archive restore for archived streams.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bucket` | (required) | S3 bucket name |
+| `--name` | (required) | Stream name to restore |
+| `--key` | | AES-256-GCM key (required if manifest is encrypted with AES) |
+| `--age-identity` | | Path to age identity file (required if manifest is encrypted with age) |
+| `--tier` | `Standard` | Restore tier: `Expedited`, `Standard`, or `Bulk` |
+| `--days` | `7` | Days to keep restored copies available |
+| `--wait` | | Wait for restore to complete (polls every 60s) |
+| `--region` | | AWS region |
+| `--prefix` | | S3 key prefix |
+| `--endpoint-url` | | Custom S3 endpoint URL |
+| `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
+| `--verbose` | | Show detailed progress events and timing |
 
 ## How It Works
 

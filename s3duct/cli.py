@@ -26,6 +26,25 @@ def main() -> None:
     pass
 
 
+@main.command()
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completion(shell: str) -> None:
+    """Generate shell completion script.
+
+    \b
+    Install completions:
+      bash: s3duct completion bash >> ~/.bashrc
+      zsh:  s3duct completion zsh >> ~/.zshrc
+      fish: s3duct completion fish > ~/.config/fish/completions/s3duct.fish
+
+    Then restart your shell or source the file.
+    """
+    from click.shell_completion import get_completion_class
+    comp_cls = get_completion_class(shell)
+    comp = comp_cls(main, {}, "s3duct", "_S3DUCT_COMPLETE")
+    click.echo(comp.source())
+
+
 def validate_name(name: str) -> None:
     """Validate stream name is safe for use as an S3 key prefix."""
     if not name or not name.strip():
