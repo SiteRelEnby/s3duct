@@ -292,6 +292,7 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--clobber` | | Overwrite existing stream (fails by default if stream exists) |
 | `--scratch-dir` | `~/.s3duct/scratch` | Directory for temporary chunk files |
 | `--tag` | | Custom metadata tag (`key=value`, repeatable) |
+| `--description` | | Human-readable description stored in manifest |
 | `--storage-class` | `STANDARD` | S3 storage class |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
@@ -304,8 +305,10 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--upload-workers` | `auto` | Parallel upload threads (`auto` adapts based on throughput, or an integer for fixed concurrency) |
 | `--min-upload-workers` | `2` | Minimum workers for auto mode |
 | `--max-upload-workers` | `16` | Maximum workers for auto mode |
+| `--bandwidth-limit` | | Max upload bandwidth per worker (e.g., `50M`, `1G`) |
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
-| `--verbose` | | Show detailed progress events and timing |
+| `--verbose` / `-v` | | Show detailed progress events and timing |
+| `--quiet` / `-q` | | Suppress all output except errors |
 | `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct get`
@@ -322,11 +325,13 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--endpoint-url` | | Custom S3 endpoint URL |
 | `--scratch-dir` | `~/.s3duct/scratch` | Directory for temporary chunk files |
 | `--retries` | `10` | Max retry attempts per S3 operation |
-| `--download-workers` | `1` | Parallel download threads (`auto` or integer) |
+| `--download-workers` | `auto` | Parallel download threads (`auto` or integer) |
 | `--min-download-workers` | `2` | Minimum workers for auto mode |
 | `--max-download-workers` | `16` | Maximum workers for auto mode |
+| `--bandwidth-limit` | | Max download bandwidth per worker (e.g., `50M`, `1G`) |
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
-| `--verbose` | | Show detailed progress events and timing |
+| `--verbose` / `-v` | | Show detailed progress events and timing |
+| `--quiet` / `-q` | | Suppress all output except errors |
 | `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct list`
@@ -351,7 +356,8 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--endpoint-url` | | Custom S3 endpoint URL |
 | `--retries` | `10` | Max retry attempts per S3 operation |
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
-| `--verbose` | | Show detailed progress events and timing |
+| `--verbose` / `-v` | | Show detailed progress events and timing |
+| `--quiet` / `-q` | | Suppress progress and summary output |
 | `--summary` | `text` | Summary output format: `text`, `json`, or `none` |
 
 ### `s3duct delete`
@@ -367,8 +373,10 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--retries` | `10` | Max retry attempts per S3 operation |
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
-| `--verbose` | | Show detailed progress events and timing |
+| `--verbose` / `-v` | | Show detailed progress events and timing |
+| `--quiet` / `-q` | | Suppress progress output |
 
 ### `s3duct restore`
 
@@ -383,11 +391,14 @@ Initiate Glacier/Deep Archive restore for archived streams.
 | `--tier` | `Standard` | Restore tier: `Expedited`, `Standard`, or `Bulk` |
 | `--days` | `7` | Days to keep restored copies available |
 | `--wait` | | Wait for restore to complete (polls every 60s) |
+| `--poll-interval` | `60` | Seconds between status checks when using `--wait` |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--retries` | `10` | Max retry attempts per S3 operation |
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
-| `--verbose` | | Show detailed progress events and timing |
+| `--verbose` / `-v` | | Show detailed progress events and timing |
+| `--quiet` / `-q` | | Suppress progress output |
 
 ## How It Works
 

@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "name": "compat-v040",
+  "description": "Compat fixture with description field",
+  "created": "2026-02-06T00:00:00+00:00",
+  "tool_version": "0.4.0a1",
+  "chunk_count": 3,
+  "chunk_size": 64,
+  "total_bytes": 147,
+  "encrypted": false,
+  "encrypted_manifest": false,
+  "encryption_method": null,
+  "encryption_recipient": null,
+  "storage_class": null,
+  "tags": {
+    "fixture": "v0.4.0"
+  },
+  "chunks": [
+    {
+      "index": 0,
+      "s3_key": "compat-v040/chunk-000000",
+      "size": 64,
+      "sha256": "2abfd483254da4cf572852144900ac2501e4808211e5b759879d879f8c5b48d5",
+      "sha3_256": "bb7e8ede39c172b619a7614433316e08129db0353b1bb421f693640f2327a29a",
+      "etag": "\"fake-etag-000000\""
+    },
+    {
+      "index": 1,
+      "s3_key": "compat-v040/chunk-000001",
+      "size": 64,
+      "sha256": "4ca448b0fdc25c863dce9334c6213b55ec341f411758d9b8945a31f47a30e7bd",
+      "sha3_256": "cfa588529391683481ddb2a4fe2c111d050c0d1d8ee0a310cce93d4762d9a963",
+      "etag": "\"fake-etag-000001\""
+    },
+    {
+      "index": 2,
+      "s3_key": "compat-v040/chunk-000002",
+      "size": 19,
+      "sha256": "08b8e31a586b6ea25208c3e27c232fdfaa488c3f351f4ab3c42e5ce7905da1a7",
+      "sha3_256": "a2545e2ed1a68f86e9fed8ed93f584917144b12fd10ccc721ac6c9a12e75c552",
+      "etag": "\"fake-etag-000002\""
+    }
+  ],
+  "final_chain": "e29b5f94022a6345305f2e3b28b41f46600068666cda560bc6e4d30a55ce908d",
+  "stream_sha256": "5b697dffe3e76909a2161f45e0b86fa630e65dd9b0e04a175a7d813024aa1dca",
+  "stream_sha3_256": "5b4ca881af82eac259ca457ae3b689b04e910bdcea704344ec57e501d450e903"
+}

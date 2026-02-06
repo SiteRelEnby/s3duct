@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import (
     ClientError,
     ConnectionClosedError,
@@ -48,14 +49,22 @@ class S3Backend(StorageBackend):
                  endpoint_url: str | None = None,
                  max_retries: int = MAX_RETRY_ATTEMPTS,
                  retry_base_delay: float = RETRY_BASE_DELAY,
-                 retry_max_delay: float = RETRY_MAX_DELAY) -> None:
+                 retry_max_delay: float = RETRY_MAX_DELAY,
+                 bandwidth_limit: int | None = None) -> None:
         self._bucket = bucket
         self._prefix = prefix.rstrip("/") + "/" if prefix else ""
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
+        self._bandwidth_limit = bandwidth_limit
         session = boto3.Session(region_name=region)
         self._client = session.client("s3", endpoint_url=endpoint_url)
+
+    def _transfer_config(self) -> TransferConfig | None:
+        """Get TransferConfig for bandwidth limiting, if configured."""
+        if self._bandwidth_limit:
+            return TransferConfig(max_bandwidth=self._bandwidth_limit)
+        return None
 
     def preflight_check(self) -> None:
         try:
@@ -93,6 +102,8 @@ class S3Backend(StorageBackend):
         if storage_class:
             extra_args["StorageClass"] = storage_class
 
+        config = self._transfer_config()
+
         for attempt in range(self._max_retries):
             try:
                 self._client.upload_file(
@@ -100,6 +111,7 @@ class S3Backend(StorageBackend):
                     self._bucket,
                     full_key,
                     ExtraArgs=extra_args or None,
+                    Config=config,
                 )
                 resp = self._client.head_object(Bucket=self._bucket, Key=full_key)
                 return resp["ETag"]
@@ -127,9 +139,10 @@ class S3Backend(StorageBackend):
 
     def download(self, key: str, dest_path: Path) -> None:
         full_key = self._full_key(key)
+        config = self._transfer_config()
         for attempt in range(self._max_retries):
             try:
-                self._client.download_file(self._bucket, full_key, str(dest_path))
+                self._client.download_file(self._bucket, full_key, str(dest_path), Config=config)
                 return
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
                 if not _is_retryable(e) or attempt == self._max_retries - 1:

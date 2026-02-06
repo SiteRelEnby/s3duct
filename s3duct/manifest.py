@@ -22,6 +22,7 @@ class ChunkRecord:
 class Manifest:
     version: int = 1
     name: str = ""
+    description: str = ""
     created: str = ""
     tool_version: str = ""
     chunk_count: int = 0
@@ -66,10 +67,12 @@ class Manifest:
             encryption_method: str | None, encryption_recipient: str | None,
             storage_class: str | None,
             tags: dict[str, str] | None = None,
-            encrypted_manifest: bool = False) -> "Manifest":
+            encrypted_manifest: bool = False,
+            description: str = "") -> "Manifest":
         from s3duct import __version__
         return Manifest(
             name=name,
+            description=description,
             created=datetime.now(timezone.utc).isoformat(),
             tool_version=__version__,
             chunk_size=chunk_size,

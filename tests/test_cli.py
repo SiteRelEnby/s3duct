@@ -390,3 +390,67 @@ def test_cli_get_scratch_dir_option():
     result = runner.invoke(main, ["get", "--help"])
     assert result.exit_code == 0
     assert "--scratch-dir" in result.output
+
+
+def test_cli_put_quiet_option():
+    """put command should accept --quiet / -q."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--quiet" in result.output or "-q" in result.output
+
+
+def test_cli_get_quiet_option():
+    """get command should accept --quiet / -q."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["get", "--help"])
+    assert result.exit_code == 0
+    assert "--quiet" in result.output or "-q" in result.output
+
+
+def test_cli_verify_quiet_option():
+    """verify command should accept --quiet / -q."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["verify", "--help"])
+    assert result.exit_code == 0
+    assert "--quiet" in result.output or "-q" in result.output
+
+
+def test_cli_delete_quiet_option():
+    """delete command should accept --quiet / -q."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["delete", "--help"])
+    assert result.exit_code == 0
+    assert "--quiet" in result.output or "-q" in result.output
+
+
+def test_cli_restore_quiet_option():
+    """restore command should accept --quiet / -q."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["restore", "--help"])
+    assert result.exit_code == 0
+    assert "--quiet" in result.output or "-q" in result.output
+
+
+def test_cli_put_bandwidth_limit_option():
+    """put command should accept --bandwidth-limit."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--bandwidth-limit" in result.output
+
+
+def test_cli_get_bandwidth_limit_option():
+    """get command should accept --bandwidth-limit."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["get", "--help"])
+    assert result.exit_code == 0
+    assert "--bandwidth-limit" in result.output
+
+
+def test_cli_put_description_option():
+    """put command should accept --description."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--description" in result.output

@@ -251,6 +251,7 @@ def run_put(
     diskspace_limit: int | None = None,
     buffer_chunks: int | None = None,
     tags: dict[str, str] | None = None,
+    description: str = "",
     strict_resume: bool = True,
     summary: str = "text",  # "text", "json", or "none"
     upload_workers: int | str = "auto",  # int for fixed, "auto" for adaptive
@@ -402,6 +403,7 @@ def run_put(
         storage_class=storage_class,
         tags=tags,
         encrypted_manifest=encrypt_manifest,
+        description=description,
     )
 
     # Add already-uploaded chunks to manifest

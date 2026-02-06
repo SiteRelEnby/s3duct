@@ -74,6 +74,7 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--no-encrypt", is_flag=True, default=False, help="Disable encryption even if --key or --age-identity set.")
 @click.option("--encrypt-manifest/--no-encrypt-manifest", default=None, help="Encrypt manifest (default: on when encryption is active). Use --no-encrypt-manifest to keep manifest as readable JSON.")
 @click.option("--tag", multiple=True, help="Custom metadata tag (key=value, repeatable).")
+@click.option("--description", default="", help="Human-readable description stored in manifest.")
 @click.option("--storage-class", default=DEFAULT_STORAGE_CLASS, help="S3 storage class. Default: STANDARD.")
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
@@ -86,15 +87,18 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--upload-workers", default="auto", help="Parallel upload threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
 @click.option("--min-upload-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
 @click.option("--max-upload-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
+@click.option("--bandwidth-limit", default=None, help="Max upload bandwidth (e.g., 50M, 1G). Limit is per worker.")
 @click.option("--expected-size", default=None, help="Expected input size for progress bar (e.g., 50G). Only affects display.")
 @click.option("--clobber", is_flag=True, default=False, help="Overwrite existing stream (default: refuse if stream exists).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress all output except errors.")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifest,
-        tag, storage_class, region, prefix, endpoint_url, scratch_dir, diskspace_limit,
-        buffer_chunks, strict_resume, retries, upload_workers, min_upload_workers,
-        max_upload_workers, expected_size, clobber, progress_mode, verbose, summary):
+        tag, description, storage_class, region, prefix, endpoint_url, scratch_dir,
+        diskspace_limit, buffer_chunks, strict_resume, retries, upload_workers,
+        min_upload_workers, max_upload_workers, bandwidth_limit, expected_size, clobber,
+        progress_mode, verbose, quiet, summary):
     """Upload a stream from stdin to S3."""
     from s3duct.encryption import parse_key
     from s3duct.uploader import run_put
@@ -118,8 +122,8 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
             encrypt = True
             encryption_method = "age"
 
-    # Warn on unencrypted upload
-    if not encrypt and not no_encrypt:
+    # Warn on unencrypted upload (unless --quiet)
+    if not encrypt and not no_encrypt and not quiet:
         click.echo(
             "WARNING: No encryption configured. Data will be uploaded in plaintext.\n"
             "         Use --key or --age-identity to encrypt, or --no-encrypt to silence this warning.",
@@ -152,8 +156,11 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
             f"--diskspace-limit ({diskspace_limit}) must be >= --chunk-size ({chunk_size})"
         )
 
+    parsed_bandwidth = parse_size(bandwidth_limit) if bandwidth_limit else None
+
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
-                        endpoint_url=endpoint_url, max_retries=retries)
+                        endpoint_url=endpoint_url, max_retries=retries,
+                        bandwidth_limit=parsed_bandwidth)
     # Parse upload_workers: "auto" or an integer
     parsed_workers: int | str = upload_workers
     if upload_workers != "auto":
@@ -175,7 +182,9 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
         raise click.ClickException("--min-upload-workers must be <= --max-upload-workers")
 
     from s3duct.progress import get_tracker
-    tracker = get_tracker(progress_mode, verbose=verbose)
+    effective_progress = "none" if quiet else progress_mode
+    effective_summary = "none" if quiet else summary
+    tracker = get_tracker(effective_progress, verbose=verbose)
 
     parsed_expected = parse_size(expected_size) if expected_size else None
 
@@ -196,8 +205,9 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
         diskspace_limit=parsed_limit,
         buffer_chunks=buffer_chunks,
         tags=tags or None,
+        description=description,
         strict_resume=strict_resume,
-        summary=summary,
+        summary=effective_summary,
         upload_workers=parsed_workers,
         min_upload_workers=min_upload_workers,
         max_upload_workers=max_upload_workers,
@@ -221,12 +231,14 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 @click.option("--download-workers", default="auto", help="Parallel download threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
 @click.option("--min-download-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
 @click.option("--max-download-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
+@click.option("--bandwidth-limit", default=None, help="Max download bandwidth (e.g., 50M, 1G). Limit is per worker.")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress all output except errors.")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
 def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_url, scratch_dir,
-        retries, download_workers, min_download_workers, max_download_workers, progress_mode,
-        verbose, summary):
+        retries, download_workers, min_download_workers, max_download_workers, bandwidth_limit,
+        progress_mode, verbose, quiet, summary):
     """Download a stream from S3 to stdout."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_get
@@ -268,11 +280,15 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
 
     from pathlib import Path
     from s3duct.progress import get_tracker
-    tracker = get_tracker(progress_mode, verbose=verbose)
+    effective_progress = "none" if quiet else progress_mode
+    effective_summary = "none" if quiet else summary
+    tracker = get_tracker(effective_progress, verbose=verbose)
     parsed_scratch = Path(scratch_dir) if scratch_dir else None
+    parsed_bandwidth = parse_size(bandwidth_limit) if bandwidth_limit else None
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
-                        endpoint_url=endpoint_url, max_retries=retries)
+                        endpoint_url=endpoint_url, max_retries=retries,
+                        bandwidth_limit=parsed_bandwidth)
     run_get(
         backend=backend,
         name=name,
@@ -281,7 +297,7 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
         aes_key=aes_key,
         age_identity=age_identity,
         scratch_dir=parsed_scratch,
-        summary=summary,
+        summary=effective_summary,
         download_workers=parsed_workers,
         min_download_workers=min_download_workers,
         max_download_workers=max_download_workers,
@@ -313,8 +329,9 @@ def list_cmd(bucket, prefix, region, endpoint_url):
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress and summary output.")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
-def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retries, progress_mode, verbose, summary):
+def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retries, progress_mode, verbose, quiet, summary):
     """Verify integrity of a stored stream."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_verify
@@ -326,12 +343,15 @@ def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retrie
 
     aes_key = parse_key(key) if key else None
 
+    effective_progress = "none" if quiet else progress_mode
+    effective_summary = "none" if quiet else summary
+
     from s3duct.progress import get_tracker
-    tracker = get_tracker(progress_mode, verbose=verbose)
+    tracker = get_tracker(effective_progress, verbose=verbose)
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
-    run_verify(backend, name, aes_key=aes_key, age_identity=age_identity, summary=summary,
+    run_verify(backend, name, aes_key=aes_key, age_identity=age_identity, summary=effective_summary,
                tracker=tracker)
 
 
@@ -348,7 +368,8 @@ def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retrie
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
-def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endpoint_url, retries, progress_mode, verbose):
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")
+def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endpoint_url, retries, progress_mode, verbose, quiet):
     """Delete a stream and all its chunks from S3."""
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_delete
@@ -367,8 +388,10 @@ def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endp
             err=True,
         )
 
+    effective_progress = "none" if quiet else progress_mode
+
     from s3duct.progress import get_tracker
-    tracker = get_tracker(progress_mode, verbose=verbose)
+    tracker = get_tracker(effective_progress, verbose=verbose)
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
@@ -393,8 +416,9 @@ def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endp
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")
 def restore(bucket, name, days, tier, wait, poll_interval, key, age_identity,
-            region, prefix, endpoint_url, retries, progress_mode, verbose):
+            region, prefix, endpoint_url, retries, progress_mode, verbose, quiet):
     """Initiate Glacier/Deep Archive restore for a stream's chunks."""
     from s3duct.encryption import parse_key
     from s3duct.thaw import run_restore
@@ -406,8 +430,10 @@ def restore(bucket, name, days, tier, wait, poll_interval, key, age_identity,
 
     aes_key = parse_key(key) if key else None
 
+    effective_progress = "none" if quiet else progress_mode
+
     from s3duct.progress import get_tracker
-    tracker = get_tracker(progress_mode, verbose=verbose)
+    tracker = get_tracker(effective_progress, verbose=verbose)
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)

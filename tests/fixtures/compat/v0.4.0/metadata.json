@@ -1,0 +1,9 @@
+{
+  "tool_version": "0.4.0a1",
+  "encrypted": false,
+  "chunk_size": 64,
+  "chunk_count": 3,
+  "total_bytes": 147,
+  "description": "Compat fixture with description field",
+  "notes": "First version with description field in manifest"
+}
