@@ -283,7 +283,7 @@ def _drain_oldest(
     chunk_path.unlink(missing_ok=True)
 
     if tracker:
-        tracker.update_chunk(job.chunk_rec.index, job.chunk_rec.size)
+        tracker.update_chunk(job.chunk_rec.index, job.chunk_rec.size, result.elapsed)
 
     if throttle:
         throttle.record_drain_time(time.monotonic() - t0)
@@ -364,6 +364,7 @@ def run_get(
         window: list[tuple[_DownloadJob, Future]] = []
         deferred_cleanup: list[Path] = []
 
+        tracker.set_workers(effective_workers)
         if adaptive:
             tracker.log(f"  (workers: auto ({effective_workers}), range {min_w}-{max_w})")
 
@@ -424,8 +425,10 @@ def run_get(
                 p.unlink(missing_ok=True)
     else:
         # --- Sequential download path (workers=1) ---
+        tracker.set_workers(1)
         for chunk_rec in manifest.chunks:
             chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
+            t0 = time.monotonic()
 
             try:
                 backend.download(chunk_rec.s3_key, chunk_path)
@@ -482,7 +485,8 @@ def run_get(
             sys.stdout.buffer.flush()
 
             chunk_path.unlink(missing_ok=True)
-            tracker.update_chunk(chunk_rec.index, chunk_rec.size)
+            elapsed = time.monotonic() - t0
+            tracker.update_chunk(chunk_rec.index, chunk_rec.size, elapsed)
 
     # Verify final chain (skip in raw/no-decrypt mode)
     raw_mode = manifest.encrypted and not decrypt

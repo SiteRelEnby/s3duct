@@ -659,3 +659,38 @@ def test_put_resume_no_manifest(upload_env):
                             Key="resume-test/.manifest.json")["Body"].read()
     manifest = Manifest.from_json(raw)
     assert manifest.chunk_count == 3
+
+
+def test_put_expected_size_short_warning(upload_env, capsys):
+    """Warning emitted when stream is shorter than --expected-size."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"s" * (CHUNK_SIZE * 2)  # 128 bytes
+    _mock_stdin(mp, data)
+
+    # Claim we expect 1000 bytes, but only send 128
+    run_put(backend, "short-stream", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, expected_size=1000)
+
+    # Should still succeed but with warning
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="short-stream/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    assert manifest.total_bytes == len(data)
+
+    # Check warning was emitted
+    captured = capsys.readouterr()
+    assert "short by" in captured.err.lower() or "truncated" in captured.err.lower()
+
+
+def test_put_expected_size_exact_no_warning(upload_env, capsys):
+    """No warning when stream matches --expected-size exactly."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"e" * (CHUNK_SIZE * 2)  # 128 bytes
+    _mock_stdin(mp, data)
+
+    run_put(backend, "exact-stream", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch, expected_size=len(data))
+
+    captured = capsys.readouterr()
+    assert "truncated" not in captured.err.lower()
+    assert "short by" not in captured.err.lower()

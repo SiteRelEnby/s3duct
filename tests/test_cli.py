@@ -309,3 +309,43 @@ def test_cli_put_clobber_option():
     result = runner.invoke(main, ["put", "--help"])
     assert result.exit_code == 0
     assert "--clobber" in result.output
+
+
+def test_cli_put_verbose_option():
+    """put command should accept --verbose/-v."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["put", "--help"])
+    assert result.exit_code == 0
+    assert "--verbose" in result.output or "-v" in result.output
+
+
+def test_cli_get_verbose_option():
+    """get command should accept --verbose/-v."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["get", "--help"])
+    assert result.exit_code == 0
+    assert "--verbose" in result.output or "-v" in result.output
+
+
+def test_cli_verify_verbose_option():
+    """verify command should accept --verbose/-v."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["verify", "--help"])
+    assert result.exit_code == 0
+    assert "--verbose" in result.output or "-v" in result.output
+
+
+def test_cli_delete_verbose_option():
+    """delete command should accept --verbose/-v."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["delete", "--help"])
+    assert result.exit_code == 0
+    assert "--verbose" in result.output or "-v" in result.output
+
+
+def test_cli_restore_verbose_option():
+    """restore command should accept --verbose/-v."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["restore", "--help"])
+    assert result.exit_code == 0
+    assert "--verbose" in result.output or "-v" in result.output

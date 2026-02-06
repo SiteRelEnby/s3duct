@@ -54,6 +54,7 @@ class UploadResult:
     """Result of a completed upload."""
     job: UploadJob
     etag: str
+    elapsed: float = 0.0
 
 
 def _upload_one(backend: StorageBackend, job: UploadJob,
@@ -79,7 +80,8 @@ def _encrypt_chunk(chunk_info: ChunkInfo, encryption_method: str | None,
 
 
 def _drain_one(window: list[tuple["UploadJob", Future]],
-               resume_log: ResumeLog, manifest: Manifest) -> None:
+               resume_log: ResumeLog, manifest: Manifest,
+               tracker: "ProgressTracker | None" = None) -> None:
     """Pop the oldest future from the window, wait for it, and record the result."""
     job, future = window.pop(0)
     try:
@@ -109,6 +111,10 @@ def _drain_one(window: list[tuple["UploadJob", Future]],
         sha3_256=result.job.dual_hash.sha3_256,
         etag=result.etag,
     ))
+
+    # Update progress tracker with elapsed time
+    if tracker:
+        tracker.update_chunk(result.job.index, result.job.size, result.elapsed)
 
     # Clean up uploaded file from disk
     result.job.upload_path.unlink(missing_ok=True)
@@ -415,7 +421,8 @@ def run_put(
     total_size = expected_size or expected_stdin_size
 
     # Start progress tracking
-    tracker.start(total_size, 0, "Uploading")
+    tracker.start(total_size, 0, "Uploading", chunk_size=chunk_size)
+    tracker.set_workers(effective_workers)
 
     # Set up adaptive throttle or fixed pool
     throttle = _AdaptiveThrottle(effective_workers, user_min, user_max, tracker=tracker) if adaptive else None
@@ -480,7 +487,8 @@ def run_put(
                     chain_hex=chain_hex,
                 )
 
-                tracker.update_chunk(chunk_info_index, chunk_info.size)
+                # Track chunk as staged (on disk, ready for upload)
+                tracker.chunk_staged(chunk_info_index, chunk_info.size)
 
                 # Acquire throttle slot if adaptive
                 if throttle:
@@ -491,6 +499,7 @@ def run_put(
                     try:
                         result = _upload_one(b, j, sc)
                         elapsed = time.monotonic() - upload_start
+                        result.elapsed = elapsed
                         if t:
                             t.record_upload_time(elapsed)
                         return result
@@ -509,7 +518,7 @@ def run_put(
                 max_window = throttle.current_workers if throttle else effective_workers
                 while len(window) >= max_window:
                     try:
-                        _drain_one(window, resume_log, manifest)
+                        _drain_one(window, resume_log, manifest, tracker)
                     except Exception:
                         _abort_window()
                         raise
@@ -520,7 +529,7 @@ def run_put(
             # Drain remaining after stdin exhausted
             while window:
                 try:
-                    _drain_one(window, resume_log, manifest)
+                    _drain_one(window, resume_log, manifest, tracker)
                 except Exception:
                     _abort_window()
                     raise
@@ -573,6 +582,17 @@ def run_put(
             f"stdin is a regular file ({expected_stdin_size:,} bytes) "
             f"but {manifest.total_bytes:,} bytes were uploaded. "
             f"The file may have been modified during upload."
+        )
+        warnings.append(msg)
+        tracker.log(f"WARNING: {msg}")
+
+    # Sanity check: if --expected-size was provided, warn if stream was shorter
+    if expected_size is not None and manifest.total_bytes < expected_size:
+        shortfall = expected_size - manifest.total_bytes
+        msg = (
+            f"--expected-size was {expected_size:,} bytes "
+            f"but stream ended at {manifest.total_bytes:,} bytes "
+            f"(short by {shortfall:,} bytes). Stream may be truncated."
         )
         warnings.append(msg)
         tracker.log(f"WARNING: {msg}")
