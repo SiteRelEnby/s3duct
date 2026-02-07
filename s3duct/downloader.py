@@ -7,7 +7,6 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
 
 import click
 from botocore.exceptions import ClientError
@@ -19,12 +18,12 @@ from s3duct.encryption import aes_decrypt_file, age_decrypt_file
 from s3duct.integrity import hash_file, compute_chain, DualHash
 from s3duct.manifest import ChunkRecord, Manifest
 from s3duct.progress import ProgressTracker, PlainProgress
+from s3duct.throttle import AdaptiveThrottle
 
 # Adaptive worker scaling constants (same defaults as uploader)
 _DL_MAX_POOL_SIZE = 16
 _DL_INITIAL_WORKERS = 4
 _DL_MIN_WORKERS = 2
-_DL_ADJUST_INTERVAL = 3
 
 
 @dataclass
@@ -43,97 +42,6 @@ class _DownloadResult:
     elapsed: float
 
 
-class _DownloadThrottle:
-    """Adaptive concurrency control for parallel downloads.
-
-    Adjusts worker count based on download time vs drain time
-    (verify + stdout write). If downloads are slow relative to drain,
-    we're download-bound and should add workers. If drain is slow
-    (stdout bottleneck), reduce workers.
-    """
-
-    def __init__(self, initial: int = _DL_INITIAL_WORKERS,
-                 min_workers: int = _DL_MIN_WORKERS,
-                 max_workers: int = _DL_MAX_POOL_SIZE,
-                 tracker: ProgressTracker | None = None) -> None:
-        self._min = max(1, min_workers)
-        self._max = max(self._min, max_workers)
-        self._current = min(max(initial, self._min), self._max)
-        self._semaphore = threading.Semaphore(self._current)
-        self._lock = threading.Lock()
-        self._download_times: list[float] = []
-        self._drain_times: list[float] = []
-        self._completions = 0
-        self._tracker = tracker
-
-    @property
-    def current_workers(self) -> int:
-        return self._current
-
-    def acquire(self) -> None:
-        self._semaphore.acquire()
-
-    def release(self) -> None:
-        self._semaphore.release()
-
-    def record_download_time(self, elapsed: float) -> None:
-        with self._lock:
-            self._download_times.append(elapsed)
-            if len(self._download_times) > 6:
-                self._download_times.pop(0)
-            self._completions += 1
-            if self._completions % _DL_ADJUST_INTERVAL == 0:
-                self._adjust()
-
-    def record_drain_time(self, elapsed: float) -> None:
-        with self._lock:
-            self._drain_times.append(elapsed)
-            if len(self._drain_times) > 6:
-                self._drain_times.pop(0)
-
-    def record_throttle(self) -> None:
-        """Called when S3 returns a throttle/SlowDown error."""
-        with self._lock:
-            if self._current > self._min:
-                try:
-                    self._semaphore.acquire(blocking=False)
-                    old = self._current + 1
-                    self._current -= 1
-                    if self._tracker:
-                        self._tracker.update_workers(old, self._current, "S3 throttle detected")
-                except Exception:
-                    pass
-
-    def _adjust(self) -> None:
-        if len(self._download_times) < 2 or len(self._drain_times) < 2:
-            return
-        avg_download = mean(self._download_times)
-        avg_drain = mean(self._drain_times)
-        if avg_drain <= 0:
-            return
-
-        old = self._current
-        if avg_download > 2 * avg_drain and self._current < self._max:
-            self._semaphore.release()
-            self._current += 1
-            if self._tracker:
-                self._tracker.update_workers(
-                    old, self._current,
-                    f"download-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s",
-                )
-        elif avg_download < 0.5 * avg_drain and self._current > self._min:
-            try:
-                self._semaphore.acquire(blocking=False)
-                self._current -= 1
-                if self._tracker:
-                    self._tracker.update_workers(
-                        old, self._current,
-                        f"drain-bound, avg download {avg_download:.1f}s vs drain {avg_drain:.1f}s",
-                    )
-            except Exception:
-                pass
-
-
 def _download_one(
     backend: StorageBackend,
     job: _DownloadJob,
@@ -142,7 +50,7 @@ def _download_one(
     encryption_method: str | None,
     aes_key: bytes | None,
     age_identity: str | None,
-    throttle: "_DownloadThrottle | None",
+    throttle: "AdaptiveThrottle | None",
 ) -> _DownloadResult:
     """Download and optionally decrypt a single chunk. Runs in a worker thread."""
     t0 = time.monotonic()
@@ -162,7 +70,7 @@ def _download_one(
 
         elapsed = time.monotonic() - t0
         if throttle:
-            throttle.record_download_time(elapsed)
+            throttle.record_transfer_time(elapsed, job.chunk_rec.size)
         return _DownloadResult(job=job, final_path=final_path, elapsed=elapsed)
     finally:
         if throttle:
@@ -221,7 +129,7 @@ def _drain_oldest(
     decrypt: bool,
     encrypted: bool,
     name: str,
-    throttle: _DownloadThrottle | None,
+    throttle: AdaptiveThrottle | None,
     tracker: ProgressTracker | None = None,
 ) -> bytes | None:
     """Pop oldest future, verify, write to stdout, cleanup. Returns updated prev_chain."""
@@ -286,7 +194,7 @@ def _drain_oldest(
         tracker.update_chunk(job.chunk_rec.index, job.chunk_rec.size, result.elapsed)
 
     if throttle:
-        throttle.record_drain_time(time.monotonic() - t0)
+        throttle.record_io_time(time.monotonic() - t0)
 
     return prev_chain
 
@@ -355,7 +263,7 @@ def run_get(
 
     if effective_workers > 1 or adaptive:
         # --- Parallel download path ---
-        throttle = _DownloadThrottle(
+        throttle = AdaptiveThrottle(
             initial=effective_workers, min_workers=min_w, max_workers=max_w,
             tracker=tracker,
         ) if adaptive else None

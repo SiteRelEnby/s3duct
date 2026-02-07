@@ -10,7 +10,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import mean
 
 import click
 from botocore.exceptions import ClientError
@@ -30,12 +29,12 @@ from s3duct.integrity import DualHash, StreamHasher, compute_chain
 from s3duct.manifest import ChunkRecord, Manifest
 from s3duct.progress import ProgressTracker, PlainProgress
 from s3duct.resume import ResumeEntry, ResumeLog
+from s3duct.throttle import AdaptiveThrottle
 
 # Adaptive worker scaling constants
 MAX_POOL_SIZE = 16
 INITIAL_WORKERS = 4
 MIN_WORKERS = 2
-ADJUST_INTERVAL = 3  # re-evaluate every N completed uploads
 
 
 @dataclass
@@ -144,97 +143,6 @@ def _stdin_expected_size() -> int | None:
     except (OSError, AttributeError):
         pass
     return None
-
-
-class _AdaptiveThrottle:
-    """Semaphore-based adaptive concurrency control.
-
-    Adjusts effective worker count based on upload vs read throughput.
-    """
-
-    def __init__(self, initial: int = INITIAL_WORKERS,
-                 min_workers: int = MIN_WORKERS,
-                 max_workers: int = MAX_POOL_SIZE,
-                 tracker: ProgressTracker | None = None) -> None:
-        self._min = max(1, min_workers)
-        self._max = max(self._min, max_workers)
-        self._current = min(max(initial, self._min), self._max)
-        self._semaphore = threading.Semaphore(self._current)
-        self._lock = threading.Lock()
-        self._upload_times: list[float] = []
-        self._read_times: list[float] = []
-        self._completions = 0
-        self._tracker = tracker
-
-    @property
-    def current_workers(self) -> int:
-        return self._current
-
-    def acquire(self) -> None:
-        """Acquire a slot before submitting work."""
-        self._semaphore.acquire()
-
-    def release(self) -> None:
-        """Release a slot after work completes."""
-        self._semaphore.release()
-
-    def record_upload_time(self, elapsed: float) -> None:
-        with self._lock:
-            self._upload_times.append(elapsed)
-            if len(self._upload_times) > 6:
-                self._upload_times.pop(0)
-            self._completions += 1
-            if self._completions % ADJUST_INTERVAL == 0:
-                self._adjust()
-
-    def record_read_time(self, elapsed: float) -> None:
-        with self._lock:
-            self._read_times.append(elapsed)
-            if len(self._read_times) > 6:
-                self._read_times.pop(0)
-
-    def record_throttle(self) -> None:
-        """Called when S3 returns a throttle/SlowDown error. Reduce by 1."""
-        with self._lock:
-            if self._current > self._min:
-                try:
-                    self._semaphore.acquire(blocking=False)
-                    old = self._current + 1
-                    self._current -= 1
-                    if self._tracker:
-                        self._tracker.update_workers(old, self._current, "S3 throttle detected")
-                except Exception:
-                    pass
-
-    def _adjust(self) -> None:
-        """Adjust concurrency based on recent upload vs read times."""
-        if len(self._upload_times) < 2 or len(self._read_times) < 2:
-            return
-        avg_upload = mean(self._upload_times)
-        avg_read = mean(self._read_times)
-        if avg_read <= 0:
-            return
-
-        old = self._current
-        if avg_upload > 2 * avg_read and self._current < self._max:
-            self._semaphore.release()
-            self._current += 1
-            if self._tracker:
-                self._tracker.update_workers(
-                    old, self._current,
-                    f"upload-bound, avg upload {avg_upload:.1f}s vs read {avg_read:.1f}s",
-                )
-        elif avg_upload < 0.5 * avg_read and self._current > self._min:
-            try:
-                self._semaphore.acquire(blocking=False)
-                self._current -= 1
-                if self._tracker:
-                    self._tracker.update_workers(
-                        old, self._current,
-                        f"read-bound, avg upload {avg_upload:.1f}s vs read {avg_read:.1f}s",
-                    )
-            except Exception:
-                pass
 
 
 def run_put(
@@ -427,7 +335,7 @@ def run_put(
     tracker.set_workers(effective_workers)
 
     # Set up adaptive throttle or fixed pool
-    throttle = _AdaptiveThrottle(effective_workers, user_min, user_max, tracker=tracker) if adaptive else None
+    throttle = AdaptiveThrottle(effective_workers, user_min, user_max, tracker=tracker) if adaptive else None
     pool_size = user_max if adaptive else effective_workers
     window: list[tuple[UploadJob, Future]] = []
     # Files to clean up after pool shutdown (deferred to avoid deleting files
@@ -462,7 +370,7 @@ def run_put(
             ):
                 read_elapsed = time.monotonic() - read_start
                 if throttle:
-                    throttle.record_read_time(read_elapsed)
+                    throttle.record_io_time(read_elapsed)
 
                 real_index = chunks_uploaded
                 chunk_info_index = real_index
@@ -503,7 +411,7 @@ def run_put(
                         elapsed = time.monotonic() - upload_start
                         result.elapsed = elapsed
                         if t:
-                            t.record_upload_time(elapsed)
+                            t.record_transfer_time(elapsed, j.size)
                         return result
                     finally:
                         if t:
