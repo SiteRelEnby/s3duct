@@ -3,6 +3,8 @@
 [![PyPI](https://img.shields.io/pypi/v/s3duct)](https://pypi.org/project/s3duct/)
 [![Python](https://img.shields.io/pypi/pyversions/s3duct)](https://pypi.org/project/s3duct/)
 [![License](https://img.shields.io/pypi/l/s3duct)](LICENSE)
+![transrights](https://pride-badges.pony.workers.dev/static/v1?label=trans%20rights&stripeWidth=6&stripeColors=5BCEFA,F5A9B8,FFFFFF,F5A9B8,5BCEFA)
+![enbyware](https://pride-badges.pony.workers.dev/static/v1?label=enbyware&labelColor=%23555&stripeWidth=8&stripeColors=FCF434%2CFFFFFF%2C9C59D1%2C2C2C2C)
 
 Chunked, resumable, encrypted pipe to S3-compatible object storage.
 
