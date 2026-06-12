@@ -133,6 +133,7 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--min-upload-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
 @click.option("--max-upload-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
 @click.option("--bandwidth-limit", default=None, help="Max upload bandwidth (e.g., 50M, 1G). Limit is per worker.")
+@click.option("--upload-checksums/--no-upload-checksums", default=None, help="SHA-256 upload checksums, verified server-side by S3 (default: on for AWS, off for custom endpoints).")
 @click.option("--expected-size", default=None, help="Expected input size for progress bar (e.g., 50G). Only affects display.")
 @click.option("--clobber", is_flag=True, default=False, help="Overwrite existing stream (default: refuse if stream exists).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
@@ -142,8 +143,8 @@ def parse_tag(value: str) -> tuple[str, str]:
 def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifest,
         tag, description, storage_class, region, prefix, endpoint_url, scratch_dir,
         diskspace_limit, buffer_chunks, strict_resume, retries, upload_workers,
-        min_upload_workers, max_upload_workers, bandwidth_limit, expected_size, clobber,
-        progress_mode, verbose, quiet, summary):
+        min_upload_workers, max_upload_workers, bandwidth_limit, upload_checksums,
+        expected_size, clobber, progress_mode, verbose, quiet, summary):
     """Upload a stream from stdin to S3."""
     from s3duct.encryption import parse_key
     from s3duct.uploader import run_put
@@ -205,7 +206,8 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries,
-                        bandwidth_limit=parsed_bandwidth)
+                        bandwidth_limit=parsed_bandwidth,
+                        upload_checksums=upload_checksums)
     parsed_workers = _resolve_workers(
         upload_workers, min_upload_workers, max_upload_workers, "upload")
 

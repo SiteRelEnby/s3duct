@@ -67,7 +67,8 @@ class S3Backend(StorageBackend):
                  max_retries: int = MAX_RETRY_ATTEMPTS,
                  retry_base_delay: float = RETRY_BASE_DELAY,
                  retry_max_delay: float = RETRY_MAX_DELAY,
-                 bandwidth_limit: int | None = None) -> None:
+                 bandwidth_limit: int | None = None,
+                 upload_checksums: bool | None = None) -> None:
         self._bucket = bucket
         self._prefix = prefix.rstrip("/") + "/" if prefix else ""
         self._max_retries = max_retries
@@ -75,6 +76,12 @@ class S3Backend(StorageBackend):
         self._retry_max_delay = retry_max_delay
         self._bandwidth_limit = bandwidth_limit
         self._endpoint_url = endpoint_url
+        # SHA-256 upload checksums: S3 verifies content integrity server-side
+        # at upload time. Default on for real AWS, off for custom endpoints
+        # (S3-compatible services have spotty checksum support).
+        if upload_checksums is None:
+            upload_checksums = endpoint_url is None
+        self._upload_checksums = upload_checksums
         session = boto3.Session(region_name=region)
         self._client = session.client("s3", endpoint_url=endpoint_url)
 
@@ -132,6 +139,8 @@ class S3Backend(StorageBackend):
         extra_args = {}
         if storage_class:
             extra_args["StorageClass"] = storage_class
+        if self._upload_checksums:
+            extra_args["ChecksumAlgorithm"] = "SHA256"
 
         config = self._transfer_config()
 
@@ -158,6 +167,8 @@ class S3Backend(StorageBackend):
         kwargs: dict = {"Bucket": self._bucket, "Key": full_key, "Body": data}
         if storage_class:
             kwargs["StorageClass"] = storage_class
+        if self._upload_checksums:
+            kwargs["ChecksumAlgorithm"] = "SHA256"
 
         for attempt in range(self._max_retries):
             try:
