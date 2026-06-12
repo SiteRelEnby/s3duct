@@ -7,6 +7,12 @@ from pathlib import Path
 
 from s3duct.config import MANIFEST_FILENAME
 
+SUPPORTED_MANIFEST_VERSION = 1
+
+
+class UnsupportedManifestVersion(ValueError):
+    """Manifest was written by a newer s3duct than this one can read."""
+
 
 @dataclass
 class ChunkRecord:
@@ -16,6 +22,9 @@ class ChunkRecord:
     sha256: str
     sha3_256: str
     etag: str
+    # Size of the encrypted object as uploaded (None for unencrypted chunks).
+    # Lets raw-mode downloads verify and re-split the encrypted stream.
+    encrypted_size: int | None = None
 
 
 @dataclass
@@ -46,12 +55,28 @@ class Manifest:
 
     def to_json(self) -> str:
         data = asdict(self)
+        # Omit null encrypted_size so manifests for unencrypted streams stay
+        # byte-compatible with readers that predate the field
+        for c in data["chunks"]:
+            if c.get("encrypted_size") is None:
+                del c["encrypted_size"]
         return json.dumps(data, indent=2)
 
     @classmethod
     def from_json(cls, raw: str | bytes) -> "Manifest":
         data = json.loads(raw)
-        chunks = [ChunkRecord(**c) for c in data.pop("chunks", [])]
+        version = data.get("version", 1)
+        if version > SUPPORTED_MANIFEST_VERSION:
+            raise UnsupportedManifestVersion(
+                f"Manifest version {version} is newer than this s3duct "
+                f"supports (version {SUPPORTED_MANIFEST_VERSION}). "
+                "Upgrade s3duct to read this stream."
+            )
+        chunk_known = {f.name for f in fields(ChunkRecord)}
+        chunks = [
+            ChunkRecord(**{k: v for k, v in c.items() if k in chunk_known})
+            for c in data.pop("chunks", [])
+        ]
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
         m = cls(**filtered)

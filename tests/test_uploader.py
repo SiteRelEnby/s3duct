@@ -694,3 +694,38 @@ def test_put_expected_size_exact_no_warning(upload_env, capsys):
     captured = capsys.readouterr()
     assert "truncated" not in captured.err.lower()
     assert "short by" not in captured.err.lower()
+
+
+def test_run_put_records_encrypted_size(upload_env):
+    """Encrypted uploads record the stored object size for raw-mode checks."""
+    import os
+    backend, client, scratch, session, mp = upload_env
+    data = b"s" * (CHUNK_SIZE * 2)
+    _mock_stdin(mp, data)
+    aes_key = os.urandom(32)
+
+    run_put(backend, "encsize", chunk_size=CHUNK_SIZE,
+            encrypt=True, encryption_method="aes-256-gcm",
+            aes_key=aes_key, scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="encsize/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    for c in manifest.chunks:
+        stored = client.head_object(Bucket="test-bucket", Key=c.s3_key)
+        assert c.encrypted_size == stored["ContentLength"]
+        assert c.encrypted_size == c.size + 28  # 12B nonce + 16B GCM tag
+
+
+def test_run_put_unencrypted_manifest_omits_encrypted_size(upload_env):
+    """Unencrypted manifests stay byte-compatible with older readers."""
+    backend, client, scratch, session, mp = upload_env
+    data = b"u" * CHUNK_SIZE
+    _mock_stdin(mp, data)
+
+    run_put(backend, "noenc-size", chunk_size=CHUNK_SIZE,
+            encrypt=False, scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="noenc-size/.manifest.json")["Body"].read()
+    assert b"encrypted_size" not in raw

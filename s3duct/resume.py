@@ -19,6 +19,7 @@ class ResumeEntry:
     s3_key: str
     etag: str
     ts: str
+    encrypted_size: int | None = None
 
     @property
     def dual_hash(self) -> DualHash:

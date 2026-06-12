@@ -17,7 +17,7 @@ from s3duct.backends.base import StorageBackend
 from s3duct.config import SCRATCH_DIR
 from s3duct.encryption import aes_decrypt_file, age_decrypt_file
 from s3duct.integrity import hash_file, compute_chain, DualHash
-from s3duct.manifest import ChunkRecord, Manifest
+from s3duct.manifest import ChunkRecord, Manifest, UnsupportedManifestVersion
 from s3duct.progress import ProgressTracker, PlainProgress
 from s3duct.throttle import AdaptiveThrottle
 
@@ -100,6 +100,8 @@ def _decrypt_manifest(
     """
     try:
         return Manifest.from_json(raw)
+    except UnsupportedManifestVersion as e:
+        raise click.ClickException(str(e))
     except (json.JSONDecodeError, UnicodeDecodeError):
         pass
 
@@ -107,21 +109,35 @@ def _decrypt_manifest(
         from s3duct.encryption import aes_decrypt_manifest
         try:
             decrypted = aes_decrypt_manifest(raw, aes_key)
-            manifest = Manifest.from_json(decrypted)
-            click.echo("Manifest decrypted successfully.", err=True)
-            return manifest
         except Exception:
-            pass
+            decrypted = None
+        if decrypted is not None:
+            try:
+                manifest = Manifest.from_json(decrypted)
+            except UnsupportedManifestVersion as e:
+                raise click.ClickException(str(e))
+            except Exception:
+                pass
+            else:
+                click.echo("Manifest decrypted successfully.", err=True)
+                return manifest
 
     if age_identity:
         from s3duct.encryption import age_decrypt_manifest
         try:
             decrypted = age_decrypt_manifest(raw, age_identity)
-            manifest = Manifest.from_json(decrypted)
-            click.echo("Manifest decrypted successfully.", err=True)
-            return manifest
         except Exception:
-            pass
+            decrypted = None
+        if decrypted is not None:
+            try:
+                manifest = Manifest.from_json(decrypted)
+            except UnsupportedManifestVersion as e:
+                raise click.ClickException(str(e))
+            except Exception:
+                pass
+            else:
+                click.echo("Manifest decrypted successfully.", err=True)
+                return manifest
 
     if aes_key or age_identity:
         raise click.ClickException(
@@ -168,8 +184,18 @@ def _drain_oldest(
     chunk_path = result.final_path
     chunk_rec = job.chunk_rec
 
-    # Verify integrity (skip in raw/no-decrypt mode)
+    # Verify integrity. In raw/no-decrypt mode the plaintext hashes can't be
+    # checked, but the encrypted object size can (when the manifest has it).
     skip_integrity = encrypted and not decrypt
+    if skip_integrity and chunk_rec.encrypted_size is not None:
+        actual = chunk_path.stat().st_size
+        if actual != chunk_rec.encrypted_size:
+            chunk_path.unlink(missing_ok=True)
+            raise click.ClickException(
+                f"Size mismatch for encrypted chunk {chunk_rec.index}: "
+                f"expected {chunk_rec.encrypted_size}, got {actual}. "
+                "Data may be corrupt."
+            )
     if not skip_integrity:
         dual_hash, size = hash_file(chunk_path)
         expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)

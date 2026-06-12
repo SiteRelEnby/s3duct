@@ -46,6 +46,7 @@ class UploadJob:
     size: int
     dual_hash: DualHash
     chain_hex: str
+    encrypted_size: int | None = None
 
 
 @dataclass
@@ -99,6 +100,7 @@ def _drain_one(window: list[tuple["UploadJob", Future]],
         s3_key=result.job.s3_key,
         etag=result.etag,
         ts=datetime.now(timezone.utc).isoformat(),
+        encrypted_size=result.job.encrypted_size,
     )
     resume_log.append(entry)
 
@@ -109,6 +111,7 @@ def _drain_one(window: list[tuple["UploadJob", Future]],
         sha256=result.job.dual_hash.sha256,
         sha3_256=result.job.dual_hash.sha3_256,
         etag=result.etag,
+        encrypted_size=result.job.encrypted_size,
     ))
 
     # Update progress tracker with elapsed time
@@ -328,6 +331,7 @@ def run_put(
             sha256=entry.sha256,
             sha3_256=entry.sha3_256,
             etag=entry.etag,
+            encrypted_size=entry.encrypted_size,
         ))
 
     chunks_uploaded = resume_log.last_chunk_index + 1
@@ -419,10 +423,12 @@ def run_put(
 
                 # Sequential: encrypt if needed
                 upload_path = chunk_info.path
+                encrypted_size = None
                 if encrypt:
                     upload_path = _encrypt_chunk(
                         chunk_info, encryption_method, aes_key, recipient
                     )
+                    encrypted_size = upload_path.stat().st_size
 
                 job = UploadJob(
                     index=chunk_info_index,
@@ -431,6 +437,7 @@ def run_put(
                     size=chunk_info.size,
                     dual_hash=chunk_info.dual_hash,
                     chain_hex=chain_hex,
+                    encrypted_size=encrypted_size,
                 )
 
                 # Track chunk as staged (on disk, ready for upload)
