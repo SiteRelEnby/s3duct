@@ -22,9 +22,11 @@ class ChunkRecord:
     sha256: str
     sha3_256: str
     etag: str
-    # Size of the encrypted object as uploaded (None for unencrypted chunks).
-    # Lets raw-mode downloads verify and re-split the encrypted stream.
+    # Size and SHA-256 of the encrypted object as uploaded (None for
+    # unencrypted chunks). Lets raw-mode downloads verify and re-split the
+    # encrypted stream without the decryption key.
     encrypted_size: int | None = None
+    encrypted_sha256: str | None = None
 
 
 @dataclass
@@ -55,11 +57,12 @@ class Manifest:
 
     def to_json(self) -> str:
         data = asdict(self)
-        # Omit null encrypted_size so manifests for unencrypted streams stay
-        # byte-compatible with readers that predate the field
+        # Omit null encrypted-object fields so manifests for unencrypted
+        # streams stay byte-compatible with readers that predate them
         for c in data["chunks"]:
-            if c.get("encrypted_size") is None:
-                del c["encrypted_size"]
+            for field_name in ("encrypted_size", "encrypted_sha256"):
+                if c.get(field_name) is None:
+                    del c[field_name]
         return json.dumps(data, indent=2)
 
     @classmethod

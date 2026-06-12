@@ -818,3 +818,36 @@ def test_manifest_version_too_new_rejected(download_env):
 
     with pytest.raises(click.ClickException, match="version 99"):
         run_get(backend, "futurever", decrypt=False, scratch_dir=scratch)
+
+
+def test_run_get_raw_mode_verifies_encrypted_sha256(download_env):
+    """In --no-decrypt mode, a same-size corrupted chunk must be caught
+    via the recorded ciphertext SHA-256."""
+    import click
+    backend, client, scratch, mp = download_env
+
+    manifest = Manifest.new("rawsha", CHUNK_SIZE, True, "aes-256-gcm", None, "STANDARD")
+    plaintext = b"p" * CHUNK_SIZE
+    stored = b"E" * (CHUNK_SIZE + 28)
+    corrupted = b"X" + stored[1:]  # same size, different content
+    s3_key = "rawsha/chunk-000000"
+    client.put_object(Bucket="test-bucket", Key=s3_key, Body=corrupted)
+    dh = DualHash(
+        sha256=hashlib.sha256(plaintext).hexdigest(),
+        sha3_256=hashlib.sha3_256(plaintext).hexdigest(),
+    )
+    resp = client.head_object(Bucket="test-bucket", Key=s3_key)
+    manifest.add_chunk(ChunkRecord(
+        index=0, s3_key=s3_key, size=len(plaintext),
+        sha256=dh.sha256, sha3_256=dh.sha3_256, etag=resp["ETag"],
+        encrypted_size=len(stored),
+        encrypted_sha256=hashlib.sha256(stored).hexdigest(),
+    ))
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("rawsha"),
+                      Body=manifest.to_json().encode())
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    with pytest.raises(click.ClickException, match="[Ii]ntegrity"):
+        run_get(backend, "rawsha", decrypt=False, scratch_dir=scratch)

@@ -25,7 +25,7 @@ from s3duct.encryption import (
     age_encrypt_file,
     get_recipient_from_identity,
 )
-from s3duct.integrity import DualHash, StreamHasher, compute_chain
+from s3duct.integrity import DualHash, StreamHasher, compute_chain, sha256_file
 from s3duct.manifest import ChunkRecord, Manifest
 from s3duct.progress import ProgressTracker, PlainProgress
 from s3duct.resume import ResumeEntry, ResumeLog
@@ -47,6 +47,7 @@ class UploadJob:
     dual_hash: DualHash
     chain_hex: str
     encrypted_size: int | None = None
+    encrypted_sha256: str | None = None
 
 
 @dataclass
@@ -65,18 +66,22 @@ def _upload_one(backend: StorageBackend, job: UploadJob,
 
 
 def _encrypt_chunk(chunk_info: ChunkInfo, encryption_method: str | None,
-                   aes_key: bytes | None, recipient: str | None) -> Path:
-    """Encrypt a chunk file and return the encrypted path. Deletes the plaintext."""
+                   aes_key: bytes | None, recipient: str | None) -> tuple[Path, str]:
+    """Encrypt a chunk file. Deletes the plaintext.
+
+    Returns (encrypted path, sha256 of the encrypted file).
+    """
     if encryption_method == "aes-256-gcm":
         enc_path = chunk_info.path.with_suffix(".enc")
-        aes_encrypt_file(chunk_info.path, enc_path, aes_key)
+        enc_sha256 = aes_encrypt_file(chunk_info.path, enc_path, aes_key)
     elif encryption_method == "age":
         enc_path = chunk_info.path.with_suffix(".age")
         age_encrypt_file(chunk_info.path, enc_path, recipient)
+        enc_sha256 = sha256_file(enc_path)
     else:
         raise ValueError(f"Unknown encryption method: {encryption_method}")
     chunk_info.path.unlink()
-    return enc_path
+    return enc_path, enc_sha256
 
 
 def _drain_one(window: list[tuple["UploadJob", Future]],
@@ -101,6 +106,7 @@ def _drain_one(window: list[tuple["UploadJob", Future]],
         etag=result.etag,
         ts=datetime.now(timezone.utc).isoformat(),
         encrypted_size=result.job.encrypted_size,
+        encrypted_sha256=result.job.encrypted_sha256,
     )
     resume_log.append(entry)
 
@@ -112,6 +118,7 @@ def _drain_one(window: list[tuple["UploadJob", Future]],
         sha3_256=result.job.dual_hash.sha3_256,
         etag=result.etag,
         encrypted_size=result.job.encrypted_size,
+        encrypted_sha256=result.job.encrypted_sha256,
     ))
 
     # Update progress tracker with elapsed time
@@ -332,6 +339,7 @@ def run_put(
             sha3_256=entry.sha3_256,
             etag=entry.etag,
             encrypted_size=entry.encrypted_size,
+            encrypted_sha256=entry.encrypted_sha256,
         ))
 
     chunks_uploaded = resume_log.last_chunk_index + 1
@@ -424,8 +432,9 @@ def run_put(
                 # Sequential: encrypt if needed
                 upload_path = chunk_info.path
                 encrypted_size = None
+                encrypted_sha256 = None
                 if encrypt:
-                    upload_path = _encrypt_chunk(
+                    upload_path, encrypted_sha256 = _encrypt_chunk(
                         chunk_info, encryption_method, aes_key, recipient
                     )
                     encrypted_size = upload_path.stat().st_size
@@ -438,6 +447,7 @@ def run_put(
                     dual_hash=chunk_info.dual_hash,
                     chain_hex=chain_hex,
                     encrypted_size=encrypted_size,
+                    encrypted_sha256=encrypted_sha256,
                 )
 
                 # Track chunk as staged (on disk, ready for upload)
