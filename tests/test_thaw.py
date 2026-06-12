@@ -368,3 +368,26 @@ def test_restore_wait_mixed_stream_terminates(thaw_env):
     # Only the glacier chunk should have been polled
     assert all(k.endswith("chunk-000001") for k in polled)
     assert polled  # and it was actually polled
+
+
+def test_restore_glacier_ir_needs_no_restore(thaw_env):
+    """GLACIER_IR is instant-retrieval: restore must report chunks available
+    and never call RestoreObject (S3 rejects it with InvalidObjectState)."""
+    backend, client, scratch, mp = thaw_env
+    data = b"i" * (CHUNK_SIZE * 2)
+    _upload_test_stream(client, "ir-stream", data, storage_class="GLACIER_IR")
+
+    initiate_calls = []
+
+    def mock_head(key):
+        return ObjectInfo(key=key, size=CHUNK_SIZE, etag='"abc"',
+                          storage_class="GLACIER_IR", restore_status=None)
+
+    def mock_initiate(key, days, tier):
+        initiate_calls.append(key)
+
+    with patch.object(backend, "head_object", side_effect=mock_head):
+        with patch.object(backend, "initiate_restore", side_effect=mock_initiate):
+            run_restore(backend, "ir-stream")
+
+    assert initiate_calls == []
