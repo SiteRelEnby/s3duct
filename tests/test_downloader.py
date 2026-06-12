@@ -767,3 +767,54 @@ def test_run_get_parallel_auto(download_env):
 
     stdout_mock.buffer.seek(0)
     assert stdout_mock.buffer.read() == data
+
+
+def test_run_get_raw_mode_verifies_encrypted_size(download_env):
+    """In --no-decrypt mode, a truncated encrypted chunk must be caught
+    via the recorded encrypted_size."""
+    import click
+    backend, client, scratch, mp = download_env
+
+    # Build an "encrypted" stream by hand: manifest hashes are of the
+    # plaintext, encrypted_size records the stored object's size.
+    manifest = Manifest.new("rawsize", CHUNK_SIZE, True, "aes-256-gcm", None, "STANDARD")
+    plaintext = b"p" * CHUNK_SIZE
+    stored = b"E" * (CHUNK_SIZE + 28)  # stand-in ciphertext
+    s3_key = "rawsize/chunk-000000"
+    client.put_object(Bucket="test-bucket", Key=s3_key, Body=stored[:-5])  # truncated!
+    dh = DualHash(
+        sha256=hashlib.sha256(plaintext).hexdigest(),
+        sha3_256=hashlib.sha3_256(plaintext).hexdigest(),
+    )
+    resp = client.head_object(Bucket="test-bucket", Key=s3_key)
+    manifest.add_chunk(ChunkRecord(
+        index=0, s3_key=s3_key, size=len(plaintext),
+        sha256=dh.sha256, sha3_256=dh.sha3_256, etag=resp["ETag"],
+        encrypted_size=len(stored),
+    ))
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("rawsize"),
+                      Body=manifest.to_json().encode())
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    with pytest.raises(click.ClickException, match="[Ss]ize mismatch"):
+        run_get(backend, "rawsize", decrypt=False, scratch_dir=scratch)
+
+
+def test_manifest_version_too_new_rejected(download_env):
+    """A manifest from a future s3duct version must fail with a clear error."""
+    import click
+    backend, client, scratch, mp = download_env
+    data = b"v" * CHUNK_SIZE
+    manifest = _upload_test_stream(client, "futurever", data)
+    raw = manifest.to_json()
+    raw = raw.replace('"version": 1', '"version": 99', 1)
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("futurever"),
+                      Body=raw.encode())
+
+    stdout_mock = type("MockStdout", (), {"buffer": io.BytesIO()})()
+    mp.setattr(sys, "stdout", stdout_mock)
+
+    with pytest.raises(click.ClickException, match="version 99"):
+        run_get(backend, "futurever", decrypt=False, scratch_dir=scratch)
