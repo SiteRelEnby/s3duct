@@ -17,7 +17,7 @@ import click
 from s3duct import __version__
 from s3duct.backends.base import StorageBackend
 from s3duct.backpressure import BackpressureConfig, BackpressureMonitor
-from s3duct.chunker import ChunkInfo, chunk_stream, fast_forward_stream
+from s3duct.chunker import chunk_stream, fast_forward_stream
 from s3duct.config import DEFAULT_CHUNK_SIZE, SCRATCH_DIR
 from s3duct.encryption import (
     aes_encrypt_file,
@@ -66,24 +66,28 @@ def _upload_one(backend: StorageBackend, job: UploadJob,
     return UploadResult(job=job, etag=etag)
 
 
-def _encrypt_chunk(chunk_info: ChunkInfo, encryption_method: str | None,
+def _encrypt_chunk(path: Path, encryption_method: str | None,
                    aes_key: bytes | None, recipient: str | None) -> tuple[Path, str]:
-    """Encrypt a chunk file. Deletes the plaintext.
+    """Encrypt a chunk file. Deletes the plaintext. Runs in a worker thread.
 
     Returns (encrypted path, sha256 of the encrypted file).
     """
     if encryption_method == "aes-256-gcm":
         assert aes_key is not None  # validated in run_put
-        enc_path = chunk_info.path.with_suffix(".enc")
-        enc_sha256 = aes_encrypt_file(chunk_info.path, enc_path, aes_key)
+        enc_path = path.with_suffix(".enc")
+        enc_sha256 = aes_encrypt_file(path, enc_path, aes_key)
     elif encryption_method == "age":
         assert recipient is not None  # resolved in run_put
-        enc_path = chunk_info.path.with_suffix(".age")
-        age_encrypt_file(chunk_info.path, enc_path, recipient)
+        enc_path = path.with_suffix(".age")
+        try:
+            age_encrypt_file(path, enc_path, recipient)
+        except Exception:
+            enc_path.unlink(missing_ok=True)
+            raise
         enc_sha256 = sha256_file(enc_path)
     else:
         raise ValueError(f"Unknown encryption method: {encryption_method}")
-    chunk_info.path.unlink()
+    path.unlink()
     return enc_path, enc_sha256
 
 
@@ -432,25 +436,15 @@ def run_put(
 
                 s3_key = _chunk_s3_key(name, chunk_info_index)
 
-                # Sequential: encrypt if needed
-                upload_path = chunk_info.path
-                encrypted_size = None
-                encrypted_sha256 = None
-                if encrypt:
-                    upload_path, encrypted_sha256 = _encrypt_chunk(
-                        chunk_info, encryption_method, aes_key, recipient
-                    )
-                    encrypted_size = upload_path.stat().st_size
-
+                # Encryption happens in the worker (parallel across chunks);
+                # the job starts out pointing at the plaintext file
                 job = UploadJob(
                     index=chunk_info_index,
-                    upload_path=upload_path,
+                    upload_path=chunk_info.path,
                     s3_key=s3_key,
                     size=chunk_info.size,
                     dual_hash=chunk_info.dual_hash,
                     chain_hex=chain_hex,
-                    encrypted_size=encrypted_size,
-                    encrypted_sha256=encrypted_sha256,
                 )
 
                 # Track chunk as staged (on disk, ready for upload)
@@ -461,9 +455,21 @@ def run_put(
                     throttle.acquire()
 
                 def _do_upload(b, j, sc, t):
-                    """Wrapper that measures upload time and releases throttle."""
+                    """Encrypt (if enabled), upload, release throttle.
+
+                    Runs in a worker thread. Mutates the job in place; the
+                    drain reads it only after future.result(), so the
+                    update is safely published.
+                    """
                     upload_start = time.monotonic()
                     try:
+                        if encrypt:
+                            enc_path, enc_sha256 = _encrypt_chunk(
+                                j.upload_path, encryption_method, aes_key, recipient
+                            )
+                            j.upload_path = enc_path
+                            j.encrypted_sha256 = enc_sha256
+                            j.encrypted_size = enc_path.stat().st_size
                         result = _upload_one(
                             b, j, sc,
                             progress_callback=lambda n: tracker.update_bytes(j.index, n),
