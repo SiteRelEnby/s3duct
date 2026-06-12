@@ -74,8 +74,15 @@ class S3Backend(StorageBackend):
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
         self._bandwidth_limit = bandwidth_limit
+        self._endpoint_url = endpoint_url
         session = boto3.Session(region_name=region)
         self._client = session.client("s3", endpoint_url=endpoint_url)
+
+    def describe(self) -> str:
+        loc = f"s3://{self._bucket}/{self._prefix}"
+        if self._endpoint_url:
+            loc += f" @ {self._endpoint_url}"
+        return loc
 
     def _transfer_config(self) -> TransferConfig | None:
         """Get TransferConfig for bandwidth limiting, if configured."""

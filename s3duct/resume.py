@@ -33,12 +33,20 @@ class ResumeEntry:
 
 
 class ResumeLog:
-    """Append-only JSONL resume log with chain verification."""
+    """Append-only JSONL resume log with chain verification.
+
+    The first line may be a context header ({"meta": {...}}) recording the
+    destination and chunk size the log was created with, so a resume against
+    a different bucket/prefix/chunk-size can be detected. Logs from older
+    versions have no header; their context is None.
+    """
 
     def __init__(self, name: str) -> None:
         safe_name = name.replace("/", "__")
         self._path = SESSION_DIR / f"{safe_name}.jsonl"
         self._entries: list[ResumeEntry] = []
+        self._context: dict | None = None
+        self._pending_context: dict | None = None
         self._load()
 
     def _load(self) -> None:
@@ -47,8 +55,22 @@ class ResumeLog:
         with open(self._path, "r") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    self._entries.append(ResumeEntry.from_json(line))
+                if not line:
+                    continue
+                data = json.loads(line)
+                if "meta" in data and "chunk" not in data:
+                    self._context = data["meta"]
+                else:
+                    self._entries.append(ResumeEntry(**data))
+
+    @property
+    def context(self) -> dict | None:
+        """Context header of an existing log, or None."""
+        return self._context
+
+    def set_context(self, context: dict) -> None:
+        """Set the context to write as a header when the log file is created."""
+        self._pending_context = context
 
     @property
     def entries(self) -> list[ResumeEntry]:
@@ -129,7 +151,11 @@ class ResumeLog:
     def append(self, entry: ResumeEntry) -> None:
         """Append a new entry and flush to disk."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not self._path.exists() and self._pending_context is not None
         with open(self._path, "a") as f:
+            if write_header:
+                f.write(json.dumps({"meta": self._pending_context}) + "\n")
+                self._context = self._pending_context
             f.write(entry.to_json() + "\n")
         self._entries.append(entry)
 
@@ -138,6 +164,7 @@ class ResumeLog:
         if self._path.exists():
             self._path.unlink()
         self._entries.clear()
+        self._context = None
 
     @property
     def path(self) -> Path:

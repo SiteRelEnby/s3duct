@@ -67,6 +67,14 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
+    def describe(self) -> str:
+        """Stable identifier for the storage location (bucket/prefix/endpoint).
+
+        Used to detect resume attempts against a different destination.
+        """
+        ...
+
+    @abstractmethod
     def preflight_check(self) -> None:
         """Verify credentials and bucket access. Raises on failure."""
         ...
