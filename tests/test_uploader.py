@@ -384,7 +384,7 @@ def test_run_put_parallel_failure(upload_env):
     call_count = 0
     original_upload = backend.upload
 
-    def failing_upload(key, path, storage_class=None):
+    def failing_upload(key, path, storage_class=None, progress_callback=None):
         nonlocal call_count
         call_count += 1
         if call_count == 3:

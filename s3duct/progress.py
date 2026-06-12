@@ -1,6 +1,7 @@
 """Progress tracking for s3duct operations."""
 
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -54,6 +55,15 @@ class ProgressTracker(ABC):
     def chunk_staged(self, index: int, size: int) -> None:
         """Record a chunk that has been staged (on disk, ready or in-flight)."""
         ...
+
+    def update_bytes(self, index: int, delta: int) -> None:
+        """Record partial transfer progress for an in-flight chunk.
+
+        Called from transfer worker threads (boto3 Callback), potentially at
+        high frequency — implementations must be thread-safe and cheap.
+        Default is a no-op; byte-level display only matters for rich modes.
+        """
+        return None
 
     @abstractmethod
     def update_workers(self, old: int, new: int, reason: str) -> None:
@@ -119,6 +129,15 @@ class RichProgress(ProgressTracker):
         self._label = ""
         self._staged = 0
         self._completed = 0
+        # Byte-level progress: completed chunks + capped in-flight deltas
+        self._byte_lock = threading.Lock()
+        self._completed_bytes = 0
+        self._inflight_bytes: dict[int, int] = {}
+        self._chunk_sizes: dict[int, int] = {}
+
+    def _position(self) -> int:
+        """Current absolute progress position (caller holds _byte_lock)."""
+        return self._completed_bytes + sum(self._inflight_bytes.values())
 
     def _update_description(self) -> None:
         """Update task description with in-flight count."""
@@ -143,13 +162,32 @@ class RichProgress(ProgressTracker):
 
     def update_chunk(self, index: int, size: int, elapsed: float | None = None) -> None:
         self._completed += 1
+        with self._byte_lock:
+            self._completed_bytes += size
+            self._inflight_bytes.pop(index, None)
+            self._chunk_sizes.pop(index, None)
+            position = self._position()
         if self._task_id is not None:
-            self._progress.update(self._task_id, advance=size)
+            self._progress.update(self._task_id, completed=position)
         self._update_description()
 
     def chunk_staged(self, index: int, size: int) -> None:
         self._staged += 1
+        with self._byte_lock:
+            self._chunk_sizes[index] = size
         self._update_description()
+
+    def update_bytes(self, index: int, delta: int) -> None:
+        with self._byte_lock:
+            current = self._inflight_bytes.get(index, 0) + delta
+            # Cap at the chunk size so retried transfers can't overshoot
+            cap = self._chunk_sizes.get(index)
+            if cap is not None:
+                current = min(current, cap)
+            self._inflight_bytes[index] = current
+            position = self._position()
+        if self._task_id is not None:
+            self._progress.update(self._task_id, completed=position)
 
     def update_workers(self, old: int, new: int, reason: str) -> None:
         self._workers = new
@@ -251,9 +289,19 @@ class RichVerboseProgress(ProgressTracker):
         self._log_lines: list[str] = []
         self._max_log_lines = 10
         self._in_flight: set[int] = set()  # Chunk indices currently being uploaded
+        # Byte-level progress from transfer callbacks (worker threads)
+        self._byte_lock = threading.Lock()
+        self._inflight_bytes: dict[int, int] = {}
+        self._chunk_sizes: dict[int, int] = {}
+        self._last_byte_refresh = 0.0
 
     def _elapsed(self) -> float:
         return time.time() - self._start_time if self._start_time else 0
+
+    def _bytes_done(self) -> int:
+        """Completed bytes plus in-flight transfer progress."""
+        with self._byte_lock:
+            return self._bytes_completed + sum(self._inflight_bytes.values())
 
     def _estimated_total_chunks(self) -> int | None:
         """Return known total, or estimate from total_bytes/chunk_size."""
@@ -270,7 +318,8 @@ class RichVerboseProgress(ProgressTracker):
         table.add_column()
 
         elapsed = self._elapsed()
-        throughput = self._bytes_completed / elapsed if elapsed > 0 else 0
+        bytes_done = self._bytes_done()
+        throughput = bytes_done / elapsed if elapsed > 0 else 0
 
         parts = []
         if self._workers:
@@ -291,9 +340,9 @@ class RichVerboseProgress(ProgressTracker):
             parts.append(", ".join(chunk_parts))
 
         if self._total_bytes:
-            parts.append(f"{_format_bytes(self._bytes_completed)} / {_format_bytes(self._total_bytes)}")
+            parts.append(f"{_format_bytes(bytes_done)} / {_format_bytes(self._total_bytes)}")
         else:
-            parts.append(_format_bytes(self._bytes_completed))
+            parts.append(_format_bytes(bytes_done))
 
         if throughput > 0:
             parts.append(f"{_format_bytes(int(throughput))}/s")
@@ -304,7 +353,7 @@ class RichVerboseProgress(ProgressTracker):
         parts.append(f"{_format_duration(elapsed)} elapsed")
 
         if self._total_bytes and throughput > 0:
-            remaining = (self._total_bytes - self._bytes_completed) / throughput
+            remaining = (self._total_bytes - bytes_done) / throughput
             parts.append(f"~{_format_duration(remaining)} remaining")
 
         table.add_row(" | ".join(parts))
@@ -314,7 +363,7 @@ class RichVerboseProgress(ProgressTracker):
         """Render a text-based progress bar."""
         if not self._total_bytes or self._total_bytes == 0:
             return ""
-        pct = min(100, (self._bytes_completed / self._total_bytes) * 100)
+        pct = min(100, (self._bytes_done() / self._total_bytes) * 100)
         bar_width = 40
         filled = int(bar_width * pct / 100)
         bar = "█" * filled + "░" * (bar_width - filled)
@@ -365,7 +414,10 @@ class RichVerboseProgress(ProgressTracker):
         self._live.start()
 
     def update_chunk(self, index: int, size: int, elapsed: float | None = None) -> None:
-        self._bytes_completed += size
+        with self._byte_lock:
+            self._bytes_completed += size
+            self._inflight_bytes.pop(index, None)
+            self._chunk_sizes.pop(index, None)
         self._chunks_completed += 1
         self._in_flight.discard(index)
 
@@ -380,6 +432,22 @@ class RichVerboseProgress(ProgressTracker):
     def chunk_staged(self, index: int, size: int) -> None:
         self._chunks_staged += 1
         self._in_flight.add(index)
+        with self._byte_lock:
+            self._chunk_sizes[index] = size
+        self._refresh()
+
+    def update_bytes(self, index: int, delta: int) -> None:
+        with self._byte_lock:
+            current = self._inflight_bytes.get(index, 0) + delta
+            cap = self._chunk_sizes.get(index)
+            if cap is not None:
+                current = min(current, cap)
+            self._inflight_bytes[index] = current
+            # Callbacks fire per ~256KB; rate-limit full re-renders
+            now = time.time()
+            if now - self._last_byte_refresh < 0.25:
+                return
+            self._last_byte_refresh = now
         self._refresh()
 
     def update_workers(self, old: int, new: int, reason: str) -> None:

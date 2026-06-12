@@ -2,6 +2,7 @@
 
 import hashlib
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 from s3duct.backends.base import ObjectInfo, StorageBackend
@@ -29,10 +30,13 @@ class LocalBackend(StorageBackend):
     def _etag(data: bytes) -> str:
         return hashlib.md5(data).hexdigest()
 
-    def upload(self, key: str, file_path: Path, storage_class: str | None = None) -> str:
+    def upload(self, key: str, file_path: Path, storage_class: str | None = None,
+               progress_callback: Callable[[int], None] | None = None) -> str:
         dest = self._full_path(key)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file_path, dest)
+        if progress_callback:
+            progress_callback(dest.stat().st_size)
         return self._etag(dest.read_bytes())
 
     def upload_bytes(self, key: str, data: bytes, storage_class: str | None = None) -> str:
@@ -41,9 +45,12 @@ class LocalBackend(StorageBackend):
         dest.write_bytes(data)
         return self._etag(data)
 
-    def download(self, key: str, dest_path: Path) -> None:
+    def download(self, key: str, dest_path: Path,
+                 progress_callback: Callable[[int], None] | None = None) -> None:
         src = self._full_path(key)
         shutil.copy2(src, dest_path)
+        if progress_callback:
+            progress_callback(dest_path.stat().st_size)
 
     def download_bytes(self, key: str) -> bytes:
         return self._full_path(key).read_bytes()

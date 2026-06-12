@@ -23,8 +23,13 @@ class StorageBackend(ABC):
     on_throttle: Callable[[], None] | None = None
 
     @abstractmethod
-    def upload(self, key: str, file_path: Path, storage_class: str | None = None) -> str:
-        """Upload a file. Returns ETag."""
+    def upload(self, key: str, file_path: Path, storage_class: str | None = None,
+               progress_callback: Callable[[int], None] | None = None) -> str:
+        """Upload a file. Returns ETag.
+
+        progress_callback, if given, is invoked with byte deltas as the
+        transfer proceeds (may be called from transfer-internal threads).
+        """
         ...
 
     @abstractmethod
@@ -33,10 +38,12 @@ class StorageBackend(ABC):
         ...
 
     @abstractmethod
-    def download(self, key: str, dest_path: Path) -> None:
+    def download(self, key: str, dest_path: Path,
+                 progress_callback: Callable[[int], None] | None = None) -> None:
         """Download an object to a local file.
 
         Raises FileNotFoundError if the object does not exist.
+        progress_callback, if given, is invoked with byte deltas.
         """
         ...
 

@@ -268,7 +268,7 @@ def test_get_glacier_error_message(thaw_env):
     stdout_mock.buffer = io.BytesIO()
     mp.setattr(sys, "stdout", stdout_mock)
 
-    def mock_download(key, dest_path):
+    def mock_download(key, dest_path, progress_callback=None):
         raise _make_client_error("InvalidObjectState")
 
     import click

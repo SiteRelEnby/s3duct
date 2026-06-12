@@ -52,11 +52,13 @@ def _download_one(
     aes_key: bytes | None,
     age_identity: str | None,
     throttle: "AdaptiveThrottle | None",
+    tracker: "ProgressTracker | None" = None,
 ) -> _DownloadResult:
     """Download and optionally decrypt a single chunk. Runs in a worker thread."""
     t0 = time.monotonic()
     try:
-        backend.download(job.chunk_rec.s3_key, job.dest_path)
+        cb = (lambda n: tracker.update_bytes(job.index, n)) if tracker else None
+        backend.download(job.chunk_rec.s3_key, job.dest_path, progress_callback=cb)
 
         final_path = job.dest_path
         if decrypt and encrypted:
@@ -350,11 +352,12 @@ def run_get(
                 if throttle:
                     throttle.acquire()
 
+                tracker.chunk_staged(chunk_rec.index, chunk_rec.size)
                 future = pool.submit(
                     _download_one, backend, job, decrypt,
                     manifest.encrypted,
                     encryption_method or manifest.encryption_method,
-                    aes_key, age_identity, throttle,
+                    aes_key, age_identity, throttle, tracker,
                 )
                 window.append((job, future))
 

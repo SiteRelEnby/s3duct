@@ -1,6 +1,7 @@
 """AWS S3 storage backend."""
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import boto3
@@ -134,7 +135,8 @@ class S3Backend(StorageBackend):
                 and exc.response["Error"].get("Code", "") in _THROTTLE_CODES):
             self.on_throttle()
 
-    def upload(self, key: str, file_path: Path, storage_class: str | None = None) -> str:
+    def upload(self, key: str, file_path: Path, storage_class: str | None = None,
+               progress_callback: Callable[[int], None] | None = None) -> str:
         full_key = self._full_key(key)
         extra_args = {}
         if storage_class:
@@ -152,6 +154,7 @@ class S3Backend(StorageBackend):
                     full_key,
                     ExtraArgs=extra_args or None,
                     Config=config,
+                    Callback=progress_callback,
                 )
                 resp = self._client.head_object(Bucket=self._bucket, Key=full_key)
                 return resp["ETag"]
@@ -181,12 +184,14 @@ class S3Backend(StorageBackend):
                 self._retry_delay(attempt)
         raise RuntimeError("unreachable")
 
-    def download(self, key: str, dest_path: Path) -> None:
+    def download(self, key: str, dest_path: Path,
+                 progress_callback: Callable[[int], None] | None = None) -> None:
         full_key = self._full_key(key)
         config = self._transfer_config()
         for attempt in range(self._max_retries):
             try:
-                self._client.download_file(self._bucket, full_key, str(dest_path), Config=config)
+                self._client.download_file(self._bucket, full_key, str(dest_path),
+                                           Config=config, Callback=progress_callback)
                 return
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
                 _raise_if_not_found(e, key)
