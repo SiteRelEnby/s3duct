@@ -2,7 +2,7 @@
 
 All notable changes to s3duct are documented here.
 
-## [Unreleased]
+## [0.4.0] - 2026-06-12
 
 ### Added
 - `verify --deep`: download every chunk and verify content hashes —
