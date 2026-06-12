@@ -68,7 +68,7 @@ class TestAbortAndContinue:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated network failure")
@@ -123,7 +123,7 @@ class TestAbortAndContinue:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated failure")
@@ -179,7 +179,7 @@ class TestResumeMismatch:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated failure")
@@ -221,7 +221,7 @@ class TestResumeMismatch:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated failure")
@@ -258,7 +258,7 @@ class TestResumeMismatch:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated failure")
@@ -294,7 +294,7 @@ class TestResumeMismatch:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated failure")
@@ -351,7 +351,7 @@ class TestResumeMismatch:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > abort_after:
                 raise ConnectionError("simulated failure")
@@ -401,7 +401,7 @@ class TestAbortAtEdges:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] > 1:
                 raise ConnectionError("fail")
@@ -439,7 +439,7 @@ class TestAbortAtEdges:
         real_upload = backend.upload
         call_count = {"n": 0}
 
-        def aborting_upload(key, path, storage_class=None):
+        def aborting_upload(key, path, storage_class=None, progress_callback=None):
             call_count["n"] += 1
             if call_count["n"] == num_chunks:
                 raise ConnectionError("fail on last")
@@ -483,7 +483,7 @@ class TestAbortAtEdges:
             call_count = {"n": 0}
 
             def make_aborter(limit):
-                def aborting_upload(key, path, storage_class=None):
+                def aborting_upload(key, path, storage_class=None, progress_callback=None):
                     call_count["n"] += 1
                     if limit is not None and call_count["n"] > limit:
                         raise ConnectionError(f"abort at {limit}")

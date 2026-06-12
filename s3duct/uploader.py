@@ -58,9 +58,11 @@ class UploadResult:
 
 
 def _upload_one(backend: StorageBackend, job: UploadJob,
-                storage_class: str | None) -> UploadResult:
+                storage_class: str | None,
+                progress_callback=None) -> UploadResult:
     """Upload a single chunk to S3. Runs in a worker thread."""
-    etag = backend.upload(job.s3_key, job.upload_path, storage_class)
+    etag = backend.upload(job.s3_key, job.upload_path, storage_class,
+                          progress_callback=progress_callback)
     return UploadResult(job=job, etag=etag)
 
 
@@ -462,7 +464,10 @@ def run_put(
                     """Wrapper that measures upload time and releases throttle."""
                     upload_start = time.monotonic()
                     try:
-                        result = _upload_one(b, j, sc)
+                        result = _upload_one(
+                            b, j, sc,
+                            progress_callback=lambda n: tracker.update_bytes(j.index, n),
+                        )
                         elapsed = time.monotonic() - upload_start
                         result.elapsed = elapsed
                         if t:

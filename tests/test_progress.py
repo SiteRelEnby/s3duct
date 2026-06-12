@@ -334,3 +334,50 @@ def test_rich_verbose_progress_in_flight_tracking():
     assert tracker._in_flight == {2}
 
     tracker.finish()
+
+
+# --- intra-chunk byte progress ---
+
+
+def test_rich_progress_update_bytes_accounting():
+    """In-flight bytes advance the bar and are replaced by the chunk total
+    on completion; retries can't overshoot the staged chunk size."""
+    from s3duct.progress import RichProgress
+
+    t = RichProgress()
+    t.start(1000, 2, "Uploading", chunk_size=500)
+    t.chunk_staged(0, 500)
+
+    t.update_bytes(0, 200)
+    assert t._position() == 200
+
+    # Retry replays bytes: capped at the staged size
+    t.update_bytes(0, 400)
+    assert t._position() == 500
+
+    t.update_chunk(0, 500)
+    assert t._position() == 500
+    assert t._inflight_bytes == {}
+    t.finish()
+
+
+def test_rich_verbose_update_bytes_accounting():
+    from s3duct.progress import RichVerboseProgress
+
+    t = RichVerboseProgress()
+    t.start(1000, 2, "Uploading", chunk_size=500)
+    t.chunk_staged(0, 500)
+    t.update_bytes(0, 100)
+    t.update_bytes(0, 100)
+    assert t._bytes_done() == 200
+    t.update_chunk(0, 500)
+    assert t._bytes_done() == 500
+    t.finish()
+
+
+def test_null_and_plain_update_bytes_noop(capsys):
+    from s3duct.progress import NullProgress, PlainProgress
+
+    for tracker in (NullProgress(), PlainProgress()):
+        tracker.update_bytes(0, 1234)  # must not raise or print
+    assert capsys.readouterr().err == ""
