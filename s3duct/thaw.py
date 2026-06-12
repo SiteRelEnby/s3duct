@@ -42,24 +42,27 @@ def run_restore(
     tracker.log(f"Stream has {total} chunks (storage class: {sc}).")
 
     if sc not in _GLACIER_CLASSES:
+        # The manifest records the class at upload time; chunks may have been
+        # lifecycle-transitioned to Glacier since, so check the actual objects.
         tracker.log(
-            f"Storage class {sc!r} does not require restore. "
-            "Chunks should be immediately downloadable.",
+            f"Manifest storage class {sc!r} does not normally require restore; "
+            "checking actual chunk status (lifecycle rules may have "
+            "transitioned chunks).",
         )
-        return
 
     # Check status and initiate restore for each chunk
     already_available = 0
     initiated = 0
     in_progress = 0
+    pending_keys: list[str] = []
 
     tracker.start(None, total, "Restoring")
 
     for chunk_rec in manifest.chunks:
         info = backend.head_object(chunk_rec.s3_key)
 
-        # Already in a non-Glacier class (e.g. lifecycle transitioned back)
-        if info.storage_class and info.storage_class not in _GLACIER_CLASSES:
+        # In a non-Glacier class (S3 reports no storage class for STANDARD)
+        if info.storage_class not in _GLACIER_CLASSES:
             already_available += 1
             tracker.update_chunk(chunk_rec.index, 0)
             continue
@@ -73,6 +76,7 @@ def run_restore(
         # Restore in progress
         if info.restore_status and 'ongoing-request="true"' in info.restore_status:
             in_progress += 1
+            pending_keys.append(chunk_rec.s3_key)
             tracker.update_chunk(chunk_rec.index, 0)
             continue
 
@@ -80,11 +84,13 @@ def run_restore(
         try:
             backend.initiate_restore(chunk_rec.s3_key, days, tier)
             initiated += 1
+            pending_keys.append(chunk_rec.s3_key)
             tracker.update_chunk(chunk_rec.index, 0)
         except ClientError as e:
             code = e.response["Error"].get("Code", "")
             if code == "RestoreAlreadyInProgress":
                 in_progress += 1
+                pending_keys.append(chunk_rec.s3_key)
                 tracker.update_chunk(chunk_rec.index, 0)
             else:
                 raise
@@ -106,16 +112,18 @@ def run_restore(
         )
         return
 
-    # Poll until all chunks are restored
+    # Poll until all pending chunks are restored. Only the chunks that
+    # actually needed a restore are polled — already-available ones never
+    # report a completed restore and would make this loop spin forever.
     tracker.log(f"Waiting for restore to complete (polling every {poll_interval}s)...")
     while True:
         time.sleep(poll_interval)
         restored = sum(
-            1 for c in manifest.chunks
-            if backend.is_restore_complete(c.s3_key)
+            1 for key in pending_keys
+            if backend.is_restore_complete(key)
         )
-        tracker.log(f"  {restored}/{total} chunks restored")
-        if restored >= total:
+        tracker.log(f"  {restored}/{len(pending_keys)} pending chunks restored")
+        if restored >= len(pending_keys):
             break
 
     tracker.log("All chunks restored. You can now run 's3duct get' to download.")
