@@ -18,6 +18,13 @@ class LocalBackend(StorageBackend):
     def _full_path(self, key: str) -> Path:
         return self._root / f"{self._prefix}{key}"
 
+    def describe(self) -> str:
+        return f"local:{self._root}/{self._prefix}"
+
+    def preflight_check(self) -> None:
+        if not self._root.is_dir():
+            raise RuntimeError(f"Local storage root {self._root} does not exist.")
+
     @staticmethod
     def _etag(data: bytes) -> str:
         return hashlib.md5(data).hexdigest()

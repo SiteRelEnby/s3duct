@@ -223,3 +223,43 @@ def test_resume_log_verify_chain_rejects_out_of_order(session_dir):
     log.append(e1)
 
     assert log.verify_chain() is False
+
+
+class TestResumeContext:
+    """Context header detects resume against a different destination."""
+
+    def _entry(self, i=0):
+        from s3duct.integrity import IntegrityHasher, compute_chain
+        h = IntegrityHasher()
+        h.update(b"data")
+        dh = h.finalize()
+        return ResumeEntry(
+            chunk=i, size=4, sha256=dh.sha256, sha3_256=dh.sha3_256,
+            chain=compute_chain(dh, None), s3_key=f"n/chunk-{i:06d}",
+            etag="e", ts="t",
+        )
+
+    def test_context_written_and_reloaded(self, session_dir):
+        log = ResumeLog("ctx-test")
+        log.set_context({"backend": "s3://b/", "chunk_size": 1024})
+        log.append(self._entry())
+        reloaded = ResumeLog("ctx-test")
+        assert reloaded.context == {"backend": "s3://b/", "chunk_size": 1024}
+        assert len(reloaded.entries) == 1
+        log.clear()
+
+    def test_log_without_header_has_none_context(self, session_dir):
+        log = ResumeLog("ctx-legacy")
+        log.append(self._entry())  # no set_context -> no header
+        reloaded = ResumeLog("ctx-legacy")
+        assert reloaded.context is None
+        assert len(reloaded.entries) == 1
+        log.clear()
+
+    def test_clear_resets_context(self, session_dir):
+        log = ResumeLog("ctx-clear")
+        log.set_context({"backend": "s3://b/", "chunk_size": 1024})
+        log.append(self._entry())
+        log.clear()
+        assert log.context is None
+        assert ResumeLog("ctx-clear").context is None

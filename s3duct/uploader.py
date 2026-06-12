@@ -208,6 +208,21 @@ def run_put(
             raise click.ClickException("--key required for AES encryption")
 
     resume_log = ResumeLog(name)
+
+    # Refuse to resume against a different destination or chunk size
+    run_context = {"backend": backend.describe(), "chunk_size": chunk_size}
+    if (resume_log.entries and resume_log.context is not None
+            and resume_log.context != run_context):
+        raise click.ClickException(
+            f"Resume log for {name!r} was created with different parameters:\n"
+            f"  log:  {resume_log.context}\n"
+            f"  now:  {run_context}\n"
+            "Re-run with the original --bucket/--prefix/--endpoint-url/"
+            "--chunk-size, or delete the resume log to start fresh: "
+            f"{resume_log.path}"
+        )
+    resume_log.set_context(run_context)
+
     stream_hasher = StreamHasher()
     prev_chain: bytes | None = None
 
