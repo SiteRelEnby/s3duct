@@ -4,7 +4,6 @@ import json as _json
 import os
 import stat
 import sys
-import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -336,22 +335,35 @@ def run_put(
 
     # Set up adaptive throttle or fixed pool
     throttle = AdaptiveThrottle(effective_workers, user_min, user_max, tracker=tracker) if adaptive else None
+    if throttle:
+        backend.on_throttle = throttle.record_throttle
     pool_size = user_max if adaptive else effective_workers
     window: list[tuple[UploadJob, Future]] = []
     # Files to clean up after pool shutdown (deferred to avoid deleting files
     # while worker threads are still trying to upload them)
     _deferred_cleanup: list[Path] = []
 
+    # Time spent waiting in _bp_hook, excluded from the read-time signal fed
+    # to the adaptive throttle (backpressure wait is not local I/O)
+    _bp_wait = [0.0]
+
     def _bp_hook() -> None:
         """Backpressure hook that drains completed uploads to free disk space."""
+        t0 = time.monotonic()
+        stall_logged = False
         while not bp_monitor.can_write_chunk():
-            if window and window[0][1].done():
-                _drain_one(window, resume_log, manifest)
-            elif window:
+            if window:
                 # Block on oldest upload to free space
-                _drain_one(window, resume_log, manifest)
+                _drain_one(window, resume_log, manifest, tracker)
             else:
+                if not stall_logged:
+                    tracker.log(
+                        f"Waiting for free disk space in {scratch_dir} "
+                        "(no uploads in flight to drain). Free up space to continue."
+                    )
+                    stall_logged = True
                 time.sleep(0.5)
+        _bp_wait[0] += time.monotonic() - t0
 
     def _abort_window() -> None:
         """Cancel remaining futures and defer file cleanup."""
@@ -368,7 +380,9 @@ def run_put(
                 sys.stdin.buffer, chunk_size, scratch_dir, stream_hasher,
                 pre_chunk_hook=_bp_hook,
             ):
-                read_elapsed = time.monotonic() - read_start
+                # Exclude backpressure wait so the throttle sees pure read time
+                read_elapsed = max(0.0, time.monotonic() - read_start - _bp_wait[0])
+                _bp_wait[0] = 0.0
                 if throttle:
                     throttle.record_io_time(read_elapsed)
 
@@ -404,8 +418,9 @@ def run_put(
                 if throttle:
                     throttle.acquire()
 
-                def _do_upload(b, j, sc, t, upload_start):
+                def _do_upload(b, j, sc, t):
                     """Wrapper that measures upload time and releases throttle."""
+                    upload_start = time.monotonic()
                     try:
                         result = _upload_one(b, j, sc)
                         elapsed = time.monotonic() - upload_start
@@ -417,10 +432,8 @@ def run_put(
                         if t:
                             t.release()
 
-                upload_start = time.monotonic()
                 future = pool.submit(
-                    _do_upload, backend, job, storage_class,
-                    throttle, upload_start,
+                    _do_upload, backend, job, storage_class, throttle,
                 )
                 window.append((job, future))
 

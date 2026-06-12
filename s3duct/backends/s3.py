@@ -32,6 +32,13 @@ _RETRYABLE_CODES = frozenset({
     "Throttling", "TooManyRequestsException",
 })
 
+# Subset of retryable codes that indicate server-side throttling and should
+# feed back into adaptive concurrency (AIMD multiplicative decrease)
+_THROTTLE_CODES = frozenset({
+    "503", "ServiceUnavailable", "SlowDown",
+    "Throttling", "TooManyRequestsException",
+})
+
 
 def _is_retryable(exc: Exception) -> bool:
     """Check if an exception is worth retrying."""
@@ -96,6 +103,13 @@ class S3Backend(StorageBackend):
         delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
         time.sleep(delay)
 
+    def _notify_if_throttle(self, exc: Exception) -> None:
+        """Report server-side throttle responses to the adaptive throttle."""
+        if (self.on_throttle is not None
+                and isinstance(exc, ClientError)
+                and exc.response["Error"].get("Code", "") in _THROTTLE_CODES):
+            self.on_throttle()
+
     def upload(self, key: str, file_path: Path, storage_class: str | None = None) -> str:
         full_key = self._full_key(key)
         extra_args = {}
@@ -116,6 +130,7 @@ class S3Backend(StorageBackend):
                 resp = self._client.head_object(Bucket=self._bucket, Key=full_key)
                 return resp["ETag"]
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                self._notify_if_throttle(e)
                 if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
                 self._retry_delay(attempt)
@@ -132,6 +147,7 @@ class S3Backend(StorageBackend):
                 resp = self._client.put_object(**kwargs)
                 return resp["ETag"]
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                self._notify_if_throttle(e)
                 if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
                 self._retry_delay(attempt)
@@ -145,9 +161,11 @@ class S3Backend(StorageBackend):
                 self._client.download_file(self._bucket, full_key, str(dest_path), Config=config)
                 return
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                self._notify_if_throttle(e)
                 if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
                 self._retry_delay(attempt)
+        raise RuntimeError("unreachable")
 
     def download_bytes(self, key: str) -> bytes:
         full_key = self._full_key(key)
@@ -156,6 +174,7 @@ class S3Backend(StorageBackend):
                 resp = self._client.get_object(Bucket=self._bucket, Key=full_key)
                 return resp["Body"].read()
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                self._notify_if_throttle(e)
                 if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
                 self._retry_delay(attempt)

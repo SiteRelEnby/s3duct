@@ -72,6 +72,18 @@ class AdaptiveThrottle:
         """Release a slot after work completes."""
         self._semaphore.release()
 
+    def _try_shrink(self) -> bool:
+        """Reclaim one permit without blocking. Returns True on success.
+
+        Semaphore.acquire(blocking=False) returns False when no permit is
+        free (it does not raise), so _current must only be decremented on
+        success or the bookkeeping drifts from the real permit count.
+        """
+        if self._semaphore.acquire(blocking=False):
+            self._current -= 1
+            return True
+        return False
+
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
@@ -122,12 +134,9 @@ class AdaptiveThrottle:
             reduction = max(1, excess // 2)
             reduced = 0
             for _ in range(reduction):
-                try:
-                    self._semaphore.acquire(blocking=False)
-                    self._current -= 1
-                    reduced += 1
-                except Exception:
+                if not self._try_shrink():
                     break
+                reduced += 1
 
             if reduced > 0:
                 self._cooldown_until = self._completions + ADJUST_INTERVAL * COOLDOWN_INTERVALS
@@ -188,22 +197,17 @@ class AdaptiveThrottle:
                 and current_tp < self._pre_scaleup_throughput * 0.9):
             # Throughput dropped >10% after scale-up — revert
             old = self._current
-            if self._current > self._min:
-                try:
-                    self._semaphore.acquire(blocking=False)
-                    self._current -= 1
-                    self._cooldown_until = (
-                        self._completions + ADJUST_INTERVAL * COOLDOWN_INTERVALS
+            if self._current > self._min and self._try_shrink():
+                self._cooldown_until = (
+                    self._completions + ADJUST_INTERVAL * COOLDOWN_INTERVALS
+                )
+                if self._tracker:
+                    self._tracker.update_workers(
+                        old, self._current,
+                        f"scale-up reverted: throughput "
+                        f"{self._pre_scaleup_throughput / 1e6:.1f} -> "
+                        f"{current_tp / 1e6:.1f} MB/s",
                     )
-                    if self._tracker:
-                        self._tracker.update_workers(
-                            old, self._current,
-                            f"scale-up reverted: throughput "
-                            f"{self._pre_scaleup_throughput / 1e6:.1f} -> "
-                            f"{current_tp / 1e6:.1f} MB/s",
-                        )
-                except Exception:
-                    pass
 
         self._pre_scaleup_throughput = None
 
@@ -221,13 +225,8 @@ class AdaptiveThrottle:
     def _scale_down(self, reason: str) -> None:
         """Remove one worker slot."""
         old = self._current
-        try:
-            self._semaphore.acquire(blocking=False)
-            self._current -= 1
-            if self._tracker:
-                self._tracker.update_workers(old, self._current, reason)
-        except Exception:
-            pass
+        if self._try_shrink() and self._tracker:
+            self._tracker.update_workers(old, self._current, reason)
 
     def _adjust(self) -> None:
         """Periodic adjustment based on transfer vs local-I/O ratio."""
