@@ -2,6 +2,43 @@
 
 All notable changes to s3duct are documented here.
 
+## [Unreleased]
+
+### Fixed
+- Adaptive throttle scale-down no longer drifts from the real semaphore
+  permit count (`acquire(blocking=False)` returns `False`, it doesn't raise)
+- AIMD multiplicative decrease is now actually wired up: S3 SlowDown/
+  Throttling responses feed back into the adaptive worker count via a new
+  `StorageBackend.on_throttle` hook (previously dead code)
+- Throttle timing signals no longer include queue wait (upload), network
+  wait (download drain), or backpressure wait (read)
+- Chunks drained under disk backpressure now update the progress display
+- `restore` checks the actual storage class of each chunk instead of the
+  manifest's record, so lifecycle-transitioned streams can be thawed;
+  `--wait` polls only pending chunks (mixed streams no longer hang)
+- `--retries 0` could make downloads silently no-op; retries must now be >= 1
+- Invalid `--chunk-size`/`--diskspace-limit`/etc. values report a clean CLI
+  error instead of a traceback; two-letter suffixes (`MB`, `GB`) accepted
+- Stream names may no longer contain `..` segments
+- LocalBackend gained the missing `preflight_check` (it previously could
+  not be instantiated)
+
+### Changed
+- Each run stages chunks in its own scratch subdirectory: concurrent
+  uploads/downloads no longer collide, and stale files from crashed runs
+  can't wedge backpressure
+- Resume logs record the destination (bucket/prefix/endpoint) and chunk
+  size; resuming with different parameters fails with a clear error
+- Missing streams report "Stream not found" instead of a boto traceback
+  (backends now raise `FileNotFoundError` for missing objects)
+- AES-256-GCM file encryption/decryption streams in 8 MB buffers instead
+  of loading whole chunks into memory (on-disk format unchanged)
+- Encrypted uploads record each chunk's stored size in the manifest;
+  `get --no-decrypt` verifies it (raw mode previously had no integrity
+  checking at all) and the sizes make raw output re-splittable
+- Manifests from a newer format version are rejected with an upgrade
+  message instead of being misparsed
+
 ## [0.3.1] - 2026-01-31
 
 - Add `--version` flag to CLI

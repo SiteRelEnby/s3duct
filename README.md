@@ -165,6 +165,10 @@ Key formats:
 - `file:/path/to/keyfile` — raw 32-byte file
 - `env:VAR_NAME` — environment variable containing hex key
 
+Prefer `file:` or `env:` in real deployments — a `hex:` key on the
+command line is visible to other local users via `ps` and may end up in
+your shell history.
+
 The manifest is encrypted by default with AES. To keep it as readable JSON:
 ```bash
 s3duct put --bucket b --name n --key hex:... --no-encrypt-manifest
@@ -440,6 +444,28 @@ chain[n] = HMAC-SHA256(chain[n-1], sha256(chunk) || sha3_256(chunk))
 
 This creates a cryptographic chain where any modification, deletion, or
 reordering of chunks is detectable.
+
+**Threat model:** the genesis key is a public constant, so the chain is
+*tamper-evident*, not tamper-proof — it protects against accidental
+corruption, truncation, and reordering, but an attacker with write access
+to the bucket can recompute a valid chain (and, in an unencrypted
+manifest, rewrite the recorded chunk hashes themselves). For protection
+against an adversarial bucket, keep manifest encryption enabled (the
+default when encryption is active): AES-GCM-encrypted manifests are
+authenticated, so the hashes and chain cannot be forged without the key.
+An unencrypted manifest also exposes plaintext chunk hashes, which lets
+anyone who can read it confirm guesses about the stream's content.
+
+### Raw mode (`get --no-decrypt`)
+
+`--no-decrypt` downloads the stored (encrypted) chunks and concatenates
+them to stdout without decrypting. Plaintext hashes can't be verified in
+this mode; each chunk is instead checked against the encrypted object
+size recorded in the manifest (streams uploaded by s3duct >= 0.4 record
+it). To split the output back into chunks for offline decryption, use the
+`encrypted_size` fields from the manifest. For AES-256-GCM each stored
+chunk is `12-byte nonce || ciphertext || 16-byte tag`, i.e. plaintext
+size + 28 bytes.
 
 ### Resume
 
