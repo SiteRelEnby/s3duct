@@ -322,3 +322,57 @@ def test_list_hides_standard_storage_class(thaw_env, capsys):
     captured = capsys.readouterr()
     assert "[STANDARD]" not in captured.out
     assert "standard-list" in captured.out
+
+
+def test_restore_lifecycle_transitioned_chunks(thaw_env):
+    """Manifest says STANDARD, but chunks were lifecycle-transitioned to
+    Glacier: restore must check actual object state and still initiate."""
+    backend, client, scratch, mp = thaw_env
+    data = b"l" * (CHUNK_SIZE * 2)
+    _upload_test_stream(client, "lifecycled", data, storage_class="STANDARD")
+
+    calls = []
+
+    def mock_head(key):
+        return ObjectInfo(key=key, size=CHUNK_SIZE, etag='"abc"',
+                          storage_class="DEEP_ARCHIVE", restore_status=None)
+
+    def mock_initiate(key, days, tier):
+        calls.append(key)
+
+    with patch.object(backend, "head_object", side_effect=mock_head):
+        with patch.object(backend, "initiate_restore", side_effect=mock_initiate):
+            run_restore(backend, "lifecycled")
+
+    assert len(calls) == 2
+
+
+def test_restore_wait_mixed_stream_terminates(thaw_env):
+    """--wait must poll only pending chunks; already-available STANDARD
+    chunks never report a completed restore and previously hung the loop."""
+    backend, client, scratch, mp = thaw_env
+    data = b"m" * (CHUNK_SIZE * 2)
+    _upload_test_stream(client, "mixed-wait", data, storage_class="GLACIER")
+
+    # Chunk 0 is STANDARD (lifecycle moved it back); chunk 1 is GLACIER
+    def mock_head(key):
+        if key.endswith("chunk-000000"):
+            return ObjectInfo(key=key, size=CHUNK_SIZE, etag='"a"',
+                              storage_class=None, restore_status=None)
+        return ObjectInfo(key=key, size=CHUNK_SIZE, etag='"b"',
+                          storage_class="GLACIER", restore_status=None)
+
+    polled = []
+
+    def mock_is_complete(key):
+        polled.append(key)
+        return True
+
+    with patch.object(backend, "head_object", side_effect=mock_head):
+        with patch.object(backend, "initiate_restore", side_effect=lambda *a: None):
+            with patch.object(backend, "is_restore_complete", side_effect=mock_is_complete):
+                run_restore(backend, "mixed-wait", wait=True, poll_interval=0)
+
+    # Only the glacier chunk should have been polled
+    assert all(k.endswith("chunk-000001") for k in polled)
+    assert polled  # and it was actually polled
