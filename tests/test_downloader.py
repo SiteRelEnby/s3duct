@@ -851,3 +851,120 @@ def test_run_get_raw_mode_verifies_encrypted_sha256(download_env):
 
     with pytest.raises(click.ClickException, match="[Ii]ntegrity"):
         run_get(backend, "rawsha", decrypt=False, scratch_dir=scratch)
+
+
+# --- verify --deep ---
+
+
+def test_verify_deep_ok(download_env):
+    backend, client, scratch, mp = download_env
+    data = b"deep verify me" * 20
+    _upload_test_stream(client, "deep-ok", data)
+
+    run_verify(backend, "deep-ok", deep=True, scratch_dir=scratch)
+    assert not list(scratch.iterdir())  # per-run dir cleaned up
+
+
+def test_verify_deep_catches_same_etag_corruption(download_env):
+    """Deep verify must catch corruption the ETag check can't (manifest
+    recording a stale/wrong etag that happens to match)."""
+    backend, client, scratch, mp = download_env
+    data = b"z" * (CHUNK_SIZE * 2)
+    manifest = _upload_test_stream(client, "deep-bad", data)
+
+    # Overwrite a chunk AND update the manifest's etag to match, so the
+    # HEAD check passes but content hashes don't
+    bad = b"B" * CHUNK_SIZE
+    client.put_object(Bucket="test-bucket", Key="deep-bad/chunk-000001", Body=bad)
+    resp = client.head_object(Bucket="test-bucket", Key="deep-bad/chunk-000001")
+    manifest.chunks[1].etag = resp["ETag"]
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("deep-bad"),
+                      Body=manifest.to_json().encode())
+
+    # Shallow verify passes (etags all match)
+    run_verify(backend, "deep-bad", deep=False)
+
+    # Deep verify fails
+    with pytest.raises(SystemExit):
+        run_verify(backend, "deep-bad", deep=True, scratch_dir=scratch)
+
+
+def test_verify_deep_encrypted_without_key_uses_ciphertext_hash(download_env):
+    """Deep verify on an encrypted stream without a key checks the
+    recorded ciphertext SHA-256."""
+    backend, client, scratch, mp = download_env
+
+    manifest = Manifest.new("deep-enc", CHUNK_SIZE, True, "aes-256-gcm", None, "STANDARD")
+    plaintext = b"p" * CHUNK_SIZE
+    stored = b"E" * (CHUNK_SIZE + 28)
+    s3_key = "deep-enc/chunk-000000"
+    client.put_object(Bucket="test-bucket", Key=s3_key, Body=stored)
+    dh = DualHash(
+        sha256=hashlib.sha256(plaintext).hexdigest(),
+        sha3_256=hashlib.sha3_256(plaintext).hexdigest(),
+    )
+    resp = client.head_object(Bucket="test-bucket", Key=s3_key)
+    manifest.add_chunk(ChunkRecord(
+        index=0, s3_key=s3_key, size=len(plaintext),
+        sha256=dh.sha256, sha3_256=dh.sha3_256, etag=resp["ETag"],
+        encrypted_size=len(stored),
+        encrypted_sha256=hashlib.sha256(stored).hexdigest(),
+    ))
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("deep-enc"),
+                      Body=manifest.to_json().encode())
+
+    # Passes with matching ciphertext
+    run_verify(backend, "deep-enc", deep=True, scratch_dir=scratch)
+
+    # Corrupt ciphertext (same size), update both etag and manifest etag
+    client.put_object(Bucket="test-bucket", Key=s3_key, Body=b"X" + stored[1:])
+    resp = client.head_object(Bucket="test-bucket", Key=s3_key)
+    manifest.chunks[0].etag = resp["ETag"]
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("deep-enc"),
+                      Body=manifest.to_json().encode())
+
+    with pytest.raises(SystemExit):
+        run_verify(backend, "deep-enc", deep=True, scratch_dir=scratch)
+
+
+def test_verify_deep_encrypted_with_key_checks_plaintext(download_env, tmp_path):
+    """Deep verify with a key decrypts and verifies plaintext + chain."""
+    import os
+    from s3duct.encryption import aes_encrypt_file
+
+    backend, client, scratch, mp = download_env
+    aes_key = os.urandom(32)
+
+    manifest = Manifest.new("deep-key", CHUNK_SIZE, True, "aes-256-gcm", None, "STANDARD")
+    plaintext = b"k" * CHUNK_SIZE
+    plain_file = tmp_path / "plain"
+    plain_file.write_bytes(plaintext)
+    enc_file = tmp_path / "enc"
+    enc_sha = aes_encrypt_file(plain_file, enc_file, aes_key)
+    stored = enc_file.read_bytes()
+
+    s3_key = "deep-key/chunk-000000"
+    client.put_object(Bucket="test-bucket", Key=s3_key, Body=stored)
+    dh = DualHash(
+        sha256=hashlib.sha256(plaintext).hexdigest(),
+        sha3_256=hashlib.sha3_256(plaintext).hexdigest(),
+    )
+    chain_hex = compute_chain(dh, None)
+    resp = client.head_object(Bucket="test-bucket", Key=s3_key)
+    manifest.add_chunk(ChunkRecord(
+        index=0, s3_key=s3_key, size=len(plaintext),
+        sha256=dh.sha256, sha3_256=dh.sha3_256, etag=resp["ETag"],
+        encrypted_size=len(stored), encrypted_sha256=enc_sha,
+    ))
+    manifest.final_chain = chain_hex
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("deep-key"),
+                      Body=manifest.to_json().encode())
+
+    run_verify(backend, "deep-key", aes_key=aes_key, deep=True, scratch_dir=scratch)
+
+    # Wrong final chain must fail when plaintext-verified
+    manifest.final_chain = "00" * 32
+    client.put_object(Bucket="test-bucket", Key=Manifest.s3_key("deep-key"),
+                      Body=manifest.to_json().encode())
+    with pytest.raises(SystemExit):
+        run_verify(backend, "deep-key", aes_key=aes_key, deep=True, scratch_dir=scratch)

@@ -334,18 +334,29 @@ def list_cmd(bucket, prefix, region, endpoint_url):
 @main.command()
 @click.option("--bucket", required=True, help="S3 bucket name.")
 @click.option("--name", required=True, help="Stream name to verify.")
+@click.option("--deep", is_flag=True, default=False, help="Download every chunk and verify content hashes (default: ETag-only HEAD check).")
 @click.option("--key", default=None, help="AES-256-GCM key (hex:..., file:..., or env:...). Required if manifest is encrypted with AES.")
 @click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file. Required if manifest is encrypted with age.")
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--scratch-dir", type=click.Path(), default=None, help="Directory for temporary chunk files during --deep (default: ~/.s3duct/scratch).")
 @click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
 @click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress and summary output.")
 @click.option("--summary", type=click.Choice(["text", "json", "none"]), default="text", help="Summary output format (default: text).")
-def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retries, progress_mode, verbose, quiet, summary):
-    """Verify integrity of a stored stream."""
+def verify(bucket, name, deep, key, age_identity, region, prefix, endpoint_url, scratch_dir,
+           retries, progress_mode, verbose, quiet, summary):
+    """Verify integrity of a stored stream.
+
+    By default compares stored ETags via HEAD requests (fast, no data
+    transfer). With --deep, downloads every chunk and verifies content:
+    ciphertext SHA-256 without a key, full plaintext hashes and the
+    integrity chain when the stream is unencrypted or --key/--age-identity
+    is provided.
+    """
+    from pathlib import Path
     from s3duct.encryption import parse_key
     from s3duct.downloader import run_verify
 
@@ -361,11 +372,12 @@ def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retrie
 
     from s3duct.progress import get_tracker
     tracker = get_tracker(effective_progress, verbose=verbose)
+    parsed_scratch = Path(scratch_dir) if scratch_dir else None
 
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries)
     run_verify(backend, name, aes_key=aes_key, age_identity=age_identity, summary=effective_summary,
-               tracker=tracker)
+               deep=deep, scratch_dir=parsed_scratch, tracker=tracker)
 
 
 @main.command()
