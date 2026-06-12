@@ -134,7 +134,9 @@ def age_encrypt_manifest(plaintext: bytes, recipient: str) -> bytes:
             input=plaintext, capture_output=True,
         )
     except FileNotFoundError:
-        raise RuntimeError("age not found. Install age: https://github.com/FiloSottile/age")
+        raise RuntimeError(
+            "age not found. Install age: https://github.com/FiloSottile/age"
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"age encrypt failed: {result.stderr.decode().strip()}")
     return result.stdout
@@ -148,7 +150,9 @@ def age_decrypt_manifest(data: bytes, identity: str) -> bytes:
             input=data, capture_output=True,
         )
     except FileNotFoundError:
-        raise RuntimeError("age not found. Install age: https://github.com/FiloSottile/age")
+        raise RuntimeError(
+            "age not found. Install age: https://github.com/FiloSottile/age"
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"age decrypt failed: {result.stderr.decode().strip()}")
     return result.stdout
@@ -166,7 +170,7 @@ def _run_age(cmd: list[str], description: str) -> subprocess.CompletedProcess:
     except FileNotFoundError:
         raise RuntimeError(
             f"{cmd[0]} not found. Install age: https://github.com/FiloSottile/age"
-        )
+        ) from None
     if result.returncode != 0:
         raise RuntimeError(f"{description}: {result.stderr.strip()}")
     return result

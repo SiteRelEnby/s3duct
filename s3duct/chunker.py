@@ -1,13 +1,12 @@
 """Stream chunking from stdin to disk files."""
 
-import sys
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
-from typing import BinaryIO, Generator
+from typing import BinaryIO
 
 from s3duct.config import DEFAULT_CHUNK_SIZE, READ_BUFFER_SIZE, SCRATCH_DIR
-from s3duct.integrity import IntegrityHasher, StreamHasher, DualHash
+from s3duct.integrity import DualHash, IntegrityHasher, StreamHasher
 
 
 @dataclass

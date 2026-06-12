@@ -2,13 +2,12 @@
 
 import time
 
-import click
 from botocore.exceptions import ClientError
 
 from s3duct.backends.base import StorageBackend
 from s3duct.downloader import _decrypt_manifest, _fetch_manifest_bytes
 from s3duct.manifest import Manifest
-from s3duct.progress import ProgressTracker, PlainProgress
+from s3duct.progress import PlainProgress, ProgressTracker
 
 # Storage classes that require restore before download
 _GLACIER_CLASSES = frozenset({"GLACIER", "DEEP_ARCHIVE", "GLACIER_IR"})

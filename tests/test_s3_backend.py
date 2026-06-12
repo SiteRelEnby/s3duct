@@ -1,6 +1,7 @@
 """Tests for s3duct.backends.s3 using moto mock."""
 
 import pytest
+
 from s3duct.backends.base import ObjectInfo
 
 
@@ -81,8 +82,9 @@ def test_upload_with_storage_class(s3_env, tmp_path):
 
 def test_prefix_handling():
     """Backend with prefix prepends to keys and strips on list."""
-    from moto import mock_aws
     import boto3
+    from moto import mock_aws
+
     from s3duct.backends.s3 import S3Backend
 
     with mock_aws():
@@ -104,7 +106,7 @@ def test_prefix_handling():
 
 def test_etag_returned(s3_env):
     backend, _ = s3_env
-    etag = backend.upload_bytes("test/etag.bin", b"etag data")
+    backend.upload_bytes("test/etag.bin", b"etag data")
     info = backend.head_object("test/etag.bin")
     # ETags from moto include quotes, S3Backend should handle both
     assert info.etag
@@ -113,6 +115,7 @@ def test_etag_returned(s3_env):
 def test_on_throttle_invoked_on_slowdown():
     """A SlowDown response must be reported via the on_throttle hook."""
     from botocore.exceptions import ClientError
+
     from s3duct.backends.s3 import S3Backend
 
     backend = S3Backend(bucket="b", region="us-east-1", retry_base_delay=0.001)
@@ -141,6 +144,7 @@ def test_on_throttle_invoked_on_slowdown():
 def test_on_throttle_not_invoked_on_other_errors():
     """Non-throttle retryable errors must not trigger the hook."""
     from botocore.exceptions import ClientError
+
     from s3duct.backends.s3 import S3Backend
 
     backend = S3Backend(bucket="b", region="us-east-1", retry_base_delay=0.001)

@@ -2,10 +2,10 @@
 
 import json
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from s3duct.config import SESSION_DIR, RESUME_LOG_FILENAME
+from s3duct.config import RESUME_LOG_FILENAME, SESSION_DIR
 from s3duct.integrity import DualHash, compute_chain
 
 
@@ -54,7 +54,7 @@ class ResumeLog:
     def _load(self) -> None:
         if not self._path.exists():
             return
-        with open(self._path, "r") as f:
+        with open(self._path) as f:
             for line in f:
                 line = line.strip()
                 if not line:

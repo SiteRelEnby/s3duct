@@ -14,7 +14,6 @@ from s3duct.downloader import run_get
 from s3duct.manifest import Manifest
 from s3duct.uploader import run_put
 
-
 # 1 MB data, 4 KB chunks = 256 chunks — enough to stress the chain
 STRESS_DATA_SIZE = 1 * 1024 * 1024
 STRESS_CHUNK_SIZE = 4 * 1024
@@ -191,7 +190,7 @@ class TestChainIntegrityStress:
             Body=manifest.to_json().encode(),
         )
 
-        stdout = _mock_stdout(mp)
+        _mock_stdout(mp)
         with pytest.raises(Exception, match="[Cc]hain|tamper|incomplete"):
             run_get(backend, "chain-del", decrypt=False, scratch_dir=scratch)
 
@@ -218,7 +217,7 @@ class TestChainIntegrityStress:
         client.put_object(Bucket="test-bucket", Key="chain-swap/chunk-000001", Body=c3)
         client.put_object(Bucket="test-bucket", Key="chain-swap/chunk-000003", Body=c1)
 
-        stdout = _mock_stdout(mp)
+        _mock_stdout(mp)
         with pytest.raises(Exception, match="[Ii]ntegrity|corrupt|mismatch|[Cc]hain"):
             run_get(backend, "chain-swap", decrypt=False, scratch_dir=scratch)
 
@@ -241,7 +240,7 @@ class TestChainIntegrityStress:
         )["Body"].read()
         client.put_object(Bucket="test-bucket", Key="chain-dup/chunk-000002", Body=c0)
 
-        stdout = _mock_stdout(mp)
+        _mock_stdout(mp)
         with pytest.raises(Exception, match="[Ii]ntegrity|corrupt|mismatch|[Cc]hain"):
             run_get(backend, "chain-dup", decrypt=False, scratch_dir=scratch)
 
@@ -281,6 +280,6 @@ class TestChainIntegrityStress:
             Body=manifest.to_json().encode(),
         )
 
-        stdout = _mock_stdout(mp)
+        _mock_stdout(mp)
         with pytest.raises(Exception, match="[Cc]hain|tamper|incomplete"):
             run_get(backend, "chain-append", decrypt=False, scratch_dir=scratch)

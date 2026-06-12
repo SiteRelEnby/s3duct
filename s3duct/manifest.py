@@ -1,9 +1,8 @@
 """Manifest for a completed upload session."""
 
 import json
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
-from pathlib import Path
 
 from s3duct.config import MANIFEST_FILENAME
 

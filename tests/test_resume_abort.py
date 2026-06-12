@@ -12,11 +12,9 @@ import pytest
 from moto import mock_aws
 
 from s3duct.backends.s3 import S3Backend
-from s3duct.manifest import Manifest
-from s3duct.resume import ResumeLog
-from s3duct.uploader import run_put
 from s3duct.downloader import run_get
-
+from s3duct.manifest import Manifest
+from s3duct.uploader import run_put
 
 CHUNK_SIZE = 4096  # 4 KB
 

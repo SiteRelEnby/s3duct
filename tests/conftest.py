@@ -1,10 +1,10 @@
 """Shared test fixtures for s3duct."""
 
 import io
+
 import boto3
 import pytest
 from moto import mock_aws
-from pathlib import Path
 
 
 @pytest.fixture

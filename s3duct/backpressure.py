@@ -1,7 +1,6 @@
 """Disk space backpressure for chunked uploads."""
 
 import shutil
-import time
 from dataclasses import dataclass
 from pathlib import Path
 

@@ -16,9 +16,9 @@ from s3duct import __version__
 from s3duct.backends.base import StorageBackend
 from s3duct.config import SCRATCH_DIR
 from s3duct.encryption import aes_decrypt_file, age_decrypt_file
-from s3duct.integrity import hash_file, compute_chain, DualHash, sha256_file
+from s3duct.integrity import DualHash, compute_chain, hash_file, sha256_file
 from s3duct.manifest import ChunkRecord, Manifest, UnsupportedManifestVersion
-from s3duct.progress import ProgressTracker, PlainProgress
+from s3duct.progress import PlainProgress, ProgressTracker
 from s3duct.throttle import AdaptiveThrottle
 
 # Adaptive worker scaling constants (same defaults as uploader)
@@ -63,8 +63,10 @@ def _download_one(
             method = encryption_method or "age"
             dec_path = job.dest_path.with_suffix(".dec")
             if method == "aes-256-gcm":
+                assert aes_key is not None  # validated in run_get
                 aes_decrypt_file(job.dest_path, dec_path, aes_key)
             else:
+                assert age_identity is not None  # validated in run_get
                 age_decrypt_file(job.dest_path, dec_path, age_identity)
             job.dest_path.unlink()
             final_path = dec_path
@@ -85,7 +87,7 @@ def _fetch_manifest_bytes(backend: StorageBackend, name: str, manifest_key: str)
     except FileNotFoundError:
         raise click.ClickException(
             f"Stream {name!r} not found (no manifest at {manifest_key!r})."
-        )
+        ) from None
 
 
 def _decrypt_manifest(
@@ -101,7 +103,7 @@ def _decrypt_manifest(
     try:
         return Manifest.from_json(raw)
     except UnsupportedManifestVersion as e:
-        raise click.ClickException(str(e))
+        raise click.ClickException(str(e)) from e
     except (json.JSONDecodeError, UnicodeDecodeError):
         pass
 
@@ -115,7 +117,7 @@ def _decrypt_manifest(
             try:
                 manifest = Manifest.from_json(decrypted)
             except UnsupportedManifestVersion as e:
-                raise click.ClickException(str(e))
+                raise click.ClickException(str(e)) from e
             except Exception:
                 pass
             else:
@@ -132,7 +134,7 @@ def _decrypt_manifest(
             try:
                 manifest = Manifest.from_json(decrypted)
             except UnsupportedManifestVersion as e:
-                raise click.ClickException(str(e))
+                raise click.ClickException(str(e)) from e
             except Exception:
                 pass
             else:
@@ -171,7 +173,7 @@ def _drain_oldest(
                 f"and not available for download.\n"
                 f"Run 's3duct restore --bucket <bucket> --name {name}' to "
                 f"initiate thaw, then retry."
-            )
+            ) from e
         raise
     except Exception:
         job.dest_path.unlink(missing_ok=True)
@@ -527,8 +529,10 @@ def _deep_verify_chunk(
         dec_path = chunk_path.with_suffix(".dec")
         try:
             if decrypt_method == "aes-256-gcm":
+                assert aes_key is not None  # decrypt_method only set with a key
                 aes_decrypt_file(chunk_path, dec_path, aes_key)
             else:
+                assert age_identity is not None
                 age_decrypt_file(chunk_path, dec_path, age_identity)
         except Exception as e:
             return f"decryption failed: {e}", prev_chain, False
@@ -621,6 +625,7 @@ def run_verify(
                 continue
 
             if deep:
+                assert run_scratch is not None  # created when deep is set
                 chunk_path = run_scratch / f"chunk-{chunk_rec.index:06d}"
                 try:
                     backend.download(chunk_rec.s3_key, chunk_path)

@@ -6,7 +6,6 @@ import io
 from s3duct.chunker import chunk_stream, fast_forward_stream
 from s3duct.integrity import StreamHasher
 
-
 CHUNK_SIZE = 64  # small chunks for testing
 
 

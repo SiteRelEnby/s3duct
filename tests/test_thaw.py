@@ -3,7 +3,7 @@
 import hashlib
 import io
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
@@ -12,13 +12,12 @@ from click.testing import CliRunner
 from moto import mock_aws
 
 from s3duct.backends.base import ObjectInfo
-from s3duct.backends.s3 import S3Backend, _is_retryable, _RETRYABLE_TRANSPORT
+from s3duct.backends.s3 import S3Backend, _is_retryable
 from s3duct.cli import main
 from s3duct.downloader import run_get, run_list
-from s3duct.integrity import compute_chain, DualHash
+from s3duct.integrity import DualHash, compute_chain
 from s3duct.manifest import ChunkRecord, Manifest
 from s3duct.thaw import run_restore
-
 
 CHUNK_SIZE = 64
 
@@ -90,10 +89,6 @@ def thaw_env(tmp_path, monkeypatch):
 # --- _is_retryable tests ---
 
 def test_is_retryable_transport_errors():
-    from botocore.exceptions import (
-        ConnectionClosedError, ConnectTimeoutError,
-        EndpointConnectionError, ReadTimeoutError,
-    )
     assert _is_retryable(ConnectionError("lost"))
     assert _is_retryable(OSError("disk"))
 
@@ -155,7 +150,6 @@ def test_restore_initiates_all(thaw_env):
     _upload_test_stream(client, "glacier-stream", data, storage_class="GLACIER")
 
     calls = []
-    original_initiate = backend.initiate_restore
 
     def mock_initiate(key, days, tier):
         calls.append((key, days, tier))
@@ -170,7 +164,7 @@ def test_restore_initiates_all(thaw_env):
             run_restore(backend, "glacier-stream", days=5, tier="Bulk")
 
     assert len(calls) == 3
-    for key, days, tier in calls:
+    for _key, days, tier in calls:
         assert days == 5
         assert tier == "Bulk"
 
@@ -236,8 +230,6 @@ def test_restore_wait_polls(thaw_env):
 
     def mock_initiate(key, days, tier):
         pass
-
-    original_sleep = __import__("time").sleep
 
     def mock_sleep(seconds):
         poll_count[0] += 1

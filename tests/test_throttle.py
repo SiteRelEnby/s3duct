@@ -1,11 +1,8 @@
 """Tests for AIMD adaptive concurrency throttle."""
 
-import threading
-import time
 
-import pytest
 
-from s3duct.throttle import AdaptiveThrottle, ADJUST_INTERVAL, COOLDOWN_INTERVALS
+from s3duct.throttle import ADJUST_INTERVAL, COOLDOWN_INTERVALS, AdaptiveThrottle
 
 
 class TestBasicScaling:

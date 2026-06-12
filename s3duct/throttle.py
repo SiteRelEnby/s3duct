@@ -18,7 +18,6 @@ from statistics import mean
 
 from s3duct.progress import ProgressTracker
 
-
 # Defaults (can be overridden per-instance)
 DEFAULT_MAX_POOL = 16
 DEFAULT_INITIAL = 4

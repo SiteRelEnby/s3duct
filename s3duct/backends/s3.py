@@ -104,20 +104,20 @@ class S3Backend(StorageBackend):
             raise RuntimeError(
                 "No AWS credentials found. Configure credentials via environment "
                 "variables, ~/.aws/credentials, IAM role, or SSO."
-            )
+            ) from None
         except PartialCredentialsError as e:
-            raise RuntimeError(f"Incomplete AWS credentials: {e}")
+            raise RuntimeError(f"Incomplete AWS credentials: {e}") from e
         except ClientError as e:
             code = e.response["Error"]["Code"]
             if code == "403":
                 raise RuntimeError(
                     f"Access denied to bucket {self._bucket!r}. "
                     "Check your IAM permissions."
-                )
+                ) from e
             elif code == "404":
                 raise RuntimeError(
                     f"Bucket {self._bucket!r} does not exist."
-                )
+                ) from e
             raise
 
     def _full_key(self, key: str) -> str:
