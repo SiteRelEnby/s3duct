@@ -5,9 +5,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 AES_NONCE_SIZE = 12  # 96 bits, recommended for GCM
+GCM_TAG_SIZE = 16
+_CRYPT_BUFFER_SIZE = 8 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -43,25 +46,56 @@ def parse_key(key_spec: str) -> bytes:
 
 
 def aes_encrypt_file(source: Path, dest: Path, key: bytes) -> None:
-    """Encrypt a file with AES-256-GCM.
+    """Encrypt a file with AES-256-GCM, streaming in fixed-size buffers.
 
     Output format: [12-byte nonce][ciphertext || 16-byte GCM tag]
+    (byte-identical to a single-shot AESGCM encryption).
     """
-    plaintext = source.read_bytes()
     nonce = os.urandom(AES_NONCE_SIZE)
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
-    dest.write_bytes(nonce + ciphertext)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    try:
+        with open(source, "rb") as src, open(dest, "wb") as out:
+            out.write(nonce)
+            while True:
+                block = src.read(_CRYPT_BUFFER_SIZE)
+                if not block:
+                    break
+                out.write(encryptor.update(block))
+            encryptor.finalize()
+            out.write(encryptor.tag)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
 
 
 def aes_decrypt_file(source: Path, dest: Path, key: bytes) -> None:
-    """Decrypt an AES-256-GCM encrypted file."""
-    data = source.read_bytes()
-    if len(data) < AES_NONCE_SIZE:
+    """Decrypt an AES-256-GCM encrypted file, streaming in fixed-size buffers.
+
+    The GCM tag is only verified at finalize, so dest is deleted on any
+    failure rather than leaving partially-written unauthenticated plaintext.
+    """
+    total = source.stat().st_size
+    if total < AES_NONCE_SIZE + GCM_TAG_SIZE:
         raise RuntimeError("Encrypted file too short (missing nonce)")
-    nonce = data[:AES_NONCE_SIZE]
-    ciphertext = data[AES_NONCE_SIZE:]
-    plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
-    dest.write_bytes(plaintext)
+    with open(source, "rb") as src:
+        nonce = src.read(AES_NONCE_SIZE)
+        src.seek(total - GCM_TAG_SIZE)
+        tag = src.read(GCM_TAG_SIZE)
+        src.seek(AES_NONCE_SIZE)
+        decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+        remaining = total - AES_NONCE_SIZE - GCM_TAG_SIZE
+        try:
+            with open(dest, "wb") as out:
+                while remaining > 0:
+                    block = src.read(min(_CRYPT_BUFFER_SIZE, remaining))
+                    if not block:
+                        raise RuntimeError("Encrypted file truncated during read")
+                    out.write(decryptor.update(block))
+                    remaining -= len(block)
+                decryptor.finalize()  # raises InvalidTag on auth failure
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
 
 
 def aes_encrypt_manifest(plaintext: bytes, key: bytes) -> bytes:
