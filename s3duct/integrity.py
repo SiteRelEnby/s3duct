@@ -18,14 +18,6 @@ class DualHash:
         return bytes.fromhex(self.sha256) + bytes.fromhex(self.sha3_256)
 
 
-@dataclass(frozen=True)
-class ChunkIntegrity:
-    """Full integrity record for a single chunk."""
-    dual_hash: DualHash
-    chain: str
-    size: int
-
-
 class IntegrityHasher:
     """Computes SHA-256 + SHA3-256 in a single pass over data."""
 
