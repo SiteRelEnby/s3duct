@@ -9,8 +9,10 @@ from s3duct.downloader import _decrypt_manifest, _fetch_manifest_bytes
 from s3duct.manifest import Manifest
 from s3duct.progress import PlainProgress, ProgressTracker
 
-# Storage classes that require restore before download
-_GLACIER_CLASSES = frozenset({"GLACIER", "DEEP_ARCHIVE", "GLACIER_IR"})
+# Storage classes that require restore before download. GLACIER_IR
+# (Instant Retrieval) is deliberately NOT here: it serves GETs directly,
+# and S3 rejects RestoreObject on it with InvalidObjectState.
+_GLACIER_CLASSES = frozenset({"GLACIER", "DEEP_ARCHIVE"})
 
 
 def run_restore(

@@ -44,3 +44,8 @@ minio-test:
 
 minio-down:
 	docker rm -f $(MINIO_NAME)
+
+# --- Live AWS: GLACIER_IR (needs AWS creds + S3DUCT_TEST_BUCKET in env) ---
+.PHONY: glacier-ir-test
+glacier-ir-test:
+	PATH="$(CURDIR)/.venv/bin:$(PATH)" bash tests/integration/glacier_ir.sh
