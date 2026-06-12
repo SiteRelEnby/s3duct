@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
-from botocore.exceptions import ClientError
 
 from s3duct import __version__
 
@@ -217,7 +216,12 @@ def run_put(
     _manifest_key = Manifest.s3_key(name)
     try:
         backend.head_object(_manifest_key)
-        # Manifest exists — a previous upload completed with this name
+        manifest_exists = True
+    except FileNotFoundError:
+        # Manifest doesn't exist — OK to proceed (fresh or resume)
+        manifest_exists = False
+
+    if manifest_exists:
         if not clobber:
             raise click.ClickException(
                 f"Stream {name!r} already exists. "
@@ -238,10 +242,6 @@ def run_put(
             )
         # Clear stale resume log from any previous attempt
         resume_log.clear()
-    except ClientError as e:
-        if e.response["Error"].get("Code") not in ("404", "NoSuchKey"):
-            raise
-        # Manifest doesn't exist — OK to proceed (fresh or resume)
 
     # Check for resume
     resume_from = -1

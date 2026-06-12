@@ -78,6 +78,16 @@ def _download_one(
             throttle.release()
 
 
+def _fetch_manifest_bytes(backend: StorageBackend, name: str, manifest_key: str) -> bytes:
+    """Download manifest bytes, mapping a missing manifest to a clear error."""
+    try:
+        return backend.download_bytes(manifest_key)
+    except FileNotFoundError:
+        raise click.ClickException(
+            f"Stream {name!r} not found (no manifest at {manifest_key!r})."
+        )
+
+
 def _decrypt_manifest(
     raw: bytes,
     aes_key: bytes | None = None,
@@ -229,7 +239,7 @@ def run_get(
     # Download manifest
     manifest_key = Manifest.s3_key(name)
     tracker.log("Downloading manifest...")
-    raw = backend.download_bytes(manifest_key)
+    raw = _fetch_manifest_bytes(backend, name, manifest_key)
 
     # Decrypt manifest if needed (validates key/identity early)
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
@@ -422,7 +432,7 @@ def run_delete(
 
     manifest_key = Manifest.s3_key(name)
     tracker.log("Downloading manifest...")
-    raw = backend.download_bytes(manifest_key)
+    raw = _fetch_manifest_bytes(backend, name, manifest_key)
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
     # Collect all keys to delete
@@ -463,7 +473,7 @@ def run_verify(
     backend.preflight_check()
 
     manifest_key = Manifest.s3_key(name)
-    raw = backend.download_bytes(manifest_key)
+    raw = _fetch_manifest_bytes(backend, name, manifest_key)
 
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
