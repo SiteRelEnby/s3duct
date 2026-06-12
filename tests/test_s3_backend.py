@@ -181,3 +181,28 @@ def test_download_missing_raises_file_not_found(s3_env, tmp_path):
     backend, _ = s3_env
     with pytest.raises(FileNotFoundError):
         backend.download("does/not/exist", tmp_path / "out.bin")
+
+
+def test_upload_checksums_default_on_for_aws(s3_env, tmp_path):
+    """Default backend (no custom endpoint) sends SHA-256 checksums."""
+    backend, client = s3_env
+    src = tmp_path / "ck.bin"
+    src.write_bytes(b"checksummed data")
+    backend.upload("test/ck.bin", src)
+    backend.upload_bytes("test/ck2.bin", b"more data")
+
+    for key in ("test/ck.bin", "test/ck2.bin"):
+        resp = client.head_object(Bucket="test-bucket", Key=key,
+                                  ChecksumMode="ENABLED")
+        assert resp.get("ChecksumSHA256")
+
+
+def test_upload_checksums_off_for_custom_endpoint():
+    """Custom endpoints default to no checksum (spotty support)."""
+    from s3duct.backends.s3 import S3Backend
+    b = S3Backend(bucket="b", region="us-east-1",
+                  endpoint_url="http://localhost:9000")
+    assert b._upload_checksums is False
+    b2 = S3Backend(bucket="b", region="us-east-1",
+                   endpoint_url="http://localhost:9000", upload_checksums=True)
+    assert b2._upload_checksums is True
