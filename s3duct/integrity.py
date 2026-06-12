@@ -76,3 +76,15 @@ def hash_file(path: Path) -> tuple[DualHash, int]:
                 break
             hasher.update(data)
     return hasher.finalize(), hasher.size
+
+
+def sha256_file(path: Path) -> str:
+    """Single SHA-256 of a file on disk (used for ciphertext verification)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(READ_BUFFER_SIZE)
+            if not data:
+                break
+            h.update(data)
+    return h.hexdigest()

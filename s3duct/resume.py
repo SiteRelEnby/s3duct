@@ -20,6 +20,7 @@ class ResumeEntry:
     etag: str
     ts: str
     encrypted_size: int | None = None
+    encrypted_sha256: str | None = None
 
     @property
     def dual_hash(self) -> DualHash:

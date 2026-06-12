@@ -1,5 +1,6 @@
 """Chunk encryption and decryption (AES-256-GCM and age)."""
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -45,27 +46,36 @@ def parse_key(key_spec: str) -> bytes:
     return raw
 
 
-def aes_encrypt_file(source: Path, dest: Path, key: bytes) -> None:
+def aes_encrypt_file(source: Path, dest: Path, key: bytes) -> str:
     """Encrypt a file with AES-256-GCM, streaming in fixed-size buffers.
 
     Output format: [12-byte nonce][ciphertext || 16-byte GCM tag]
     (byte-identical to a single-shot AESGCM encryption).
+
+    Returns the SHA-256 hex digest of the complete encrypted file, computed
+    in the same pass, so raw-mode downloads can verify the ciphertext.
     """
     nonce = os.urandom(AES_NONCE_SIZE)
     encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    ct_hash = hashlib.sha256()
     try:
         with open(source, "rb") as src, open(dest, "wb") as out:
             out.write(nonce)
+            ct_hash.update(nonce)
             while True:
                 block = src.read(_CRYPT_BUFFER_SIZE)
                 if not block:
                     break
-                out.write(encryptor.update(block))
+                ct_block = encryptor.update(block)
+                out.write(ct_block)
+                ct_hash.update(ct_block)
             encryptor.finalize()
             out.write(encryptor.tag)
+            ct_hash.update(encryptor.tag)
     except Exception:
         dest.unlink(missing_ok=True)
         raise
+    return ct_hash.hexdigest()
 
 
 def aes_decrypt_file(source: Path, dest: Path, key: bytes) -> None:

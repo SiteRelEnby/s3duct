@@ -729,3 +729,24 @@ def test_run_put_unencrypted_manifest_omits_encrypted_size(upload_env):
     raw = client.get_object(Bucket="test-bucket",
                             Key="noenc-size/.manifest.json")["Body"].read()
     assert b"encrypted_size" not in raw
+
+
+def test_run_put_records_encrypted_sha256(upload_env):
+    """Encrypted uploads record the ciphertext SHA-256 in the manifest."""
+    import hashlib
+    import os
+    backend, client, scratch, session, mp = upload_env
+    data = b"c" * (CHUNK_SIZE * 2)
+    _mock_stdin(mp, data)
+    aes_key = os.urandom(32)
+
+    run_put(backend, "encsha", chunk_size=CHUNK_SIZE,
+            encrypt=True, encryption_method="aes-256-gcm",
+            aes_key=aes_key, scratch_dir=scratch)
+
+    raw = client.get_object(Bucket="test-bucket",
+                            Key="encsha/.manifest.json")["Body"].read()
+    manifest = Manifest.from_json(raw)
+    for c in manifest.chunks:
+        stored = client.get_object(Bucket="test-bucket", Key=c.s3_key)["Body"].read()
+        assert c.encrypted_sha256 == hashlib.sha256(stored).hexdigest()
