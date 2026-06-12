@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/s3duct)](https://pypi.org/project/s3duct/)
 [![Python](https://img.shields.io/pypi/pyversions/s3duct)](https://pypi.org/project/s3duct/)
 [![License](https://img.shields.io/pypi/l/s3duct)](LICENSE)
+
 ![transrights](https://pride-badges.pony.workers.dev/static/v1?label=trans%20rights&stripeWidth=6&stripeColors=5BCEFA,F5A9B8,FFFFFF,F5A9B8,5BCEFA)
 ![enbyware](https://pride-badges.pony.workers.dev/static/v1?label=enbyware&labelColor=%23555&stripeWidth=8&stripeColors=FCF434%2CFFFFFF%2C9C59D1%2C2C2C2C)
 ![pluralmade](https://pride-badges.pony.workers.dev/static/v1?label=plural+made&labelColor=%23555&stripeWidth=8&stripeColors=2e0525%2C553578%2C7675c3%2C89c7b0%2Cf4ecbd)
@@ -25,6 +26,9 @@ verification, optional encryption, cache management, and automatic resume on fai
 - **Parallel uploads** - adaptive multi-threaded upload pipeline with automatic
   concurrency scaling
 - **Backpressure** - disk-aware flow control prevents scratch directory from filling up
+- **Deep verification** - `verify --deep` re-downloads and hash-verifies every chunk;
+  upload checksums (SHA-256) are verified server-side by S3 at upload time
+- **Maintenance** - `gc` collects orphaned chunks, `prune` rotates old backup streams
 - **S3-compatible** - works with AWS S3, Cloudflare R2, MinIO, Backblaze B2, Wasabi,
   and any S3-compatible endpoint via `--endpoint-url`
 
@@ -124,7 +128,11 @@ s3duct list --bucket mybucket
 ### Verify integrity
 
 ```bash
+# Fast: HEAD each chunk and compare stored ETags
 s3duct verify --bucket mybucket --name mybackup
+
+# Deep: download every chunk and verify content hashes + integrity chain
+s3duct verify --bucket mybucket --name mybackup --deep --key hex:...
 ```
 
 ## Encryption
@@ -356,11 +364,13 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 |--------|---------|-------------|
 | `--bucket` | (required) | S3 bucket name |
 | `--name` | (required) | Stream name to verify |
+| `--deep` | | Download every chunk and verify content hashes (default: ETag-only HEAD check). Without a key, encrypted streams are verified against the recorded ciphertext SHA-256; with `--key`/`--age-identity`, plaintext hashes and the full integrity chain are checked |
 | `--key` | | AES-256-GCM key (required if manifest is encrypted with AES) |
 | `--age-identity` | | Path to age identity file (required if manifest is encrypted with age) |
 | `--region` | | AWS region |
 | `--prefix` | | S3 key prefix |
 | `--endpoint-url` | | Custom S3 endpoint URL |
+| `--scratch-dir` | `~/.s3duct/scratch` | Directory for temporary chunk files during `--deep` |
 | `--retries` | `10` | Max retry attempts per S3 operation |
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
 | `--verbose` / `-v` | | Show detailed progress events and timing |
@@ -384,6 +394,51 @@ s3duct put --bucket mybucket --name backup --no-encrypt \
 | `--progress` | `auto` | Progress display: `auto`, `rich`, `plain`, or `none` |
 | `--verbose` / `-v` | | Show detailed progress events and timing |
 | `--quiet` / `-q` | | Suppress progress output |
+
+### `s3duct gc`
+
+Delete orphaned chunks not referenced by any manifest — leftovers from
+interrupted uploads that were never resumed, or `--clobber` re-uploads.
+Objects newer than `--older-than` days are never touched, so a running
+upload is safe. Streams with unreadable (encrypted) manifests are skipped
+unless a key is given, and keys s3duct didn't create are never deleted.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bucket` | (required) | S3 bucket name |
+| `--older-than` | `7` | Only delete orphans older than this many days |
+| `--dry-run` | | Show what would be deleted without deleting |
+| `--force` | | Skip confirmation prompt |
+| `--key` | | AES-256-GCM key, to read encrypted manifests |
+| `--age-identity` | | Path to age identity file, to read encrypted manifests |
+| `--region` | | AWS region |
+| `--prefix` | | S3 key prefix |
+| `--endpoint-url` | | Custom S3 endpoint URL |
+| `--retries` | `10` | Max retry attempts per S3 operation |
+
+### `s3duct prune`
+
+Backup rotation: keep the newest N streams (by manifest creation time)
+matching `--stream-prefix`, delete the rest.
+
+```bash
+# Keep the 7 newest daily backups
+s3duct prune --bucket b --stream-prefix daily/ --keep 7
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bucket` | (required) | S3 bucket name |
+| `--keep` | (required) | Number of newest streams to keep |
+| `--stream-prefix` | | Only consider streams whose name starts with this prefix |
+| `--dry-run` | | Show what would be deleted without deleting |
+| `--force` | | Skip confirmation prompt |
+| `--key` | | AES-256-GCM key, to read encrypted manifests |
+| `--age-identity` | | Path to age identity file, to read encrypted manifests |
+| `--region` | | AWS region |
+| `--prefix` | | S3 key prefix |
+| `--endpoint-url` | | Custom S3 endpoint URL |
+| `--retries` | `10` | Max retry attempts per S3 operation |
 
 ### `s3duct restore`
 
@@ -460,12 +515,13 @@ anyone who can read it confirm guesses about the stream's content.
 
 `--no-decrypt` downloads the stored (encrypted) chunks and concatenates
 them to stdout without decrypting. Plaintext hashes can't be verified in
-this mode; each chunk is instead checked against the encrypted object
-size recorded in the manifest (streams uploaded by s3duct >= 0.4 record
-it). To split the output back into chunks for offline decryption, use the
-`encrypted_size` fields from the manifest. For AES-256-GCM each stored
-chunk is `12-byte nonce || ciphertext || 16-byte tag`, i.e. plaintext
-size + 28 bytes.
+this mode; each chunk is instead checked against the encrypted object's
+size and SHA-256 recorded in the manifest (streams uploaded by
+s3duct >= 0.4 record both), so raw-mode output is fully
+integrity-verified without the decryption key. To split the output back
+into chunks for offline decryption, use the `encrypted_size` fields from
+the manifest. For AES-256-GCM each stored chunk is `12-byte nonce ||
+ciphertext || 16-byte tag`, i.e. plaintext size + 28 bytes.
 
 ### Resume
 

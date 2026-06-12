@@ -4,6 +4,26 @@ All notable changes to s3duct are documented here.
 
 ## [Unreleased]
 
+### Added
+- `verify --deep`: download every chunk and verify content hashes —
+  ciphertext SHA-256 without a key, plaintext dual-hash plus the full
+  integrity chain with one (default verify remains the fast ETag check)
+- `gc` command: delete orphaned chunks (interrupted uploads, `--clobber`
+  leftovers), age-gated by `--older-than` to protect in-progress uploads
+- `prune` command: backup rotation — keep the newest N streams matching
+  `--stream-prefix`, delete the rest
+- Encrypted uploads record the ciphertext SHA-256 per chunk;
+  `get --no-decrypt` (raw mode) is now fully integrity-verified without
+  the decryption key
+- SHA-256 upload checksums, verified server-side by S3 at upload time
+  (default on for AWS, off for custom endpoints; `--upload-checksums`
+  to override)
+- Intra-chunk transfer progress: rich progress modes now advance during
+  a chunk's upload/download instead of once per completed chunk
+- Chunk encryption runs in upload workers (parallel) instead of the main
+  read loop
+- ruff + mypy in CI
+
 ### Fixed
 - Adaptive throttle scale-down no longer drifts from the real semaphore
   permit count (`acquire(blocking=False)` returns `False`, it doesn't raise)
