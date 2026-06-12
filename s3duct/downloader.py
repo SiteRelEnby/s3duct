@@ -2,7 +2,6 @@
 
 import json
 import sys
-import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -134,7 +133,6 @@ def _drain_oldest(
 ) -> bytes | None:
     """Pop oldest future, verify, write to stdout, cleanup. Returns updated prev_chain."""
     job, future = window.pop(0)
-    t0 = time.monotonic()
     try:
         result: _DownloadResult = future.result()
     except ClientError as e:
@@ -152,6 +150,9 @@ def _drain_oldest(
         job.dest_path.with_suffix(".dec").unlink(missing_ok=True)
         raise
 
+    # Local I/O clock starts only after the download result is in, so the
+    # throttle's verify/write signal isn't inflated by network wait
+    t0 = time.monotonic()
     chunk_path = result.final_path
     chunk_rec = job.chunk_rec
 
@@ -267,6 +268,8 @@ def run_get(
             initial=effective_workers, min_workers=min_w, max_workers=max_w,
             tracker=tracker,
         ) if adaptive else None
+        if throttle:
+            backend.on_throttle = throttle.record_throttle
 
         pool_size = max_w if adaptive else effective_workers
         window: list[tuple[_DownloadJob, Future]] = []

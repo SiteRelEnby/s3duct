@@ -108,3 +108,58 @@ def test_etag_returned(s3_env):
     info = backend.head_object("test/etag.bin")
     # ETags from moto include quotes, S3Backend should handle both
     assert info.etag
+
+
+def test_on_throttle_invoked_on_slowdown():
+    """A SlowDown response must be reported via the on_throttle hook."""
+    from botocore.exceptions import ClientError
+    from s3duct.backends.s3 import S3Backend
+
+    backend = S3Backend(bucket="b", region="us-east-1", retry_base_delay=0.001)
+    calls = []
+    backend.on_throttle = lambda: calls.append(1)
+
+    class FakeClient:
+        def __init__(self):
+            self.attempts = 0
+
+        def put_object(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ClientError(
+                    {"Error": {"Code": "SlowDown", "Message": "slow down"}},
+                    "PutObject",
+                )
+            return {"ETag": '"abc"'}
+
+    backend._client = FakeClient()
+    etag = backend.upload_bytes("k", b"data")
+    assert etag == '"abc"'
+    assert calls == [1]
+
+
+def test_on_throttle_not_invoked_on_other_errors():
+    """Non-throttle retryable errors must not trigger the hook."""
+    from botocore.exceptions import ClientError
+    from s3duct.backends.s3 import S3Backend
+
+    backend = S3Backend(bucket="b", region="us-east-1", retry_base_delay=0.001)
+    calls = []
+    backend.on_throttle = lambda: calls.append(1)
+
+    class FakeClient:
+        def __init__(self):
+            self.attempts = 0
+
+        def put_object(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ClientError(
+                    {"Error": {"Code": "InternalError", "Message": "oops"}},
+                    "PutObject",
+                )
+            return {"ETag": '"abc"'}
+
+    backend._client = FakeClient()
+    backend.upload_bytes("k", b"data")
+    assert calls == []

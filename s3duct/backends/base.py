@@ -1,6 +1,7 @@
 """Abstract storage backend interface."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,11 @@ class ObjectInfo:
 
 
 class StorageBackend(ABC):
+
+    # Invoked when the backend hits a server-side throttle response
+    # (e.g. S3 SlowDown). Set by pipelines running adaptive concurrency
+    # so the throttle can apply AIMD multiplicative decrease.
+    on_throttle: Callable[[], None] | None = None
 
     @abstractmethod
     def upload(self, key: str, file_path: Path, storage_class: str | None = None) -> str:

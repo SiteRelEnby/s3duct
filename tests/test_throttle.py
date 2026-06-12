@@ -227,6 +227,44 @@ class TestSemaphore:
         t.release()
 
 
+class TestShrinkAccounting:
+    """Scale-down must only decrement current_workers when a permit is
+    actually reclaimed (Semaphore.acquire(blocking=False) returns False,
+    it does not raise)."""
+
+    def test_throttle_with_all_permits_busy_is_noop(self):
+        t = AdaptiveThrottle(initial=4, min_workers=1, max_workers=8)
+        for _ in range(4):
+            t.acquire()
+        t.record_throttle()
+        assert t.current_workers == 4  # nothing reclaimable, no drift
+        for _ in range(4):
+            t.release()
+        # All advertised slots must actually be acquirable, and no more
+        for _ in range(t.current_workers):
+            assert t._semaphore.acquire(blocking=False)
+        assert not t._semaphore.acquire(blocking=False)
+
+    def test_throttle_partial_reclaim(self):
+        t = AdaptiveThrottle(initial=8, min_workers=2, max_workers=16)
+        for _ in range(6):
+            t.acquire()
+        # excess = 6, wants -3, but only 2 permits are free
+        t.record_throttle()
+        assert t.current_workers == 6
+        for _ in range(6):
+            t.release()
+
+    def test_scale_down_with_all_permits_busy_is_noop(self):
+        t = AdaptiveThrottle(initial=4, min_workers=2, max_workers=8)
+        for _ in range(4):
+            t.acquire()
+        t._scale_down("test")
+        assert t.current_workers == 4
+        for _ in range(4):
+            t.release()
+
+
 class TestTrackerCallbacks:
     """Test that tracker.update_workers is called on scaling events."""
 
