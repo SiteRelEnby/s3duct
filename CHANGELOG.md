@@ -2,6 +2,11 @@
 
 All notable changes to s3duct are documented here.
 
+## [0.4.1] - 2026-06-12
+
+- Version bump because we made a mistake with the 0.4.0 build, pushed
+some refs to wrong remote.
+
 ## [0.4.0] - 2026-06-12
 
 ### Added
