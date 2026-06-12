@@ -213,3 +213,49 @@ def test_parse_key_invalid_format():
 def test_parse_key_wrong_length():
     with pytest.raises(ValueError, match="32 bytes"):
         parse_key("hex:aabb")  # only 2 bytes
+
+
+def test_aes_streaming_format_matches_single_shot(tmp_path):
+    """Streamed encryption output must stay byte-compatible with the
+    single-shot AESGCM format (nonce + ciphertext + tag)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from s3duct.encryption import AES_NONCE_SIZE
+
+    key = os.urandom(32)
+    data = os.urandom(3 * 1024 * 1024 + 7)
+    src = tmp_path / "plain.bin"
+    src.write_bytes(data)
+
+    enc = tmp_path / "enc.bin"
+    aes_encrypt_file(src, enc, key)
+    blob = enc.read_bytes()
+
+    # Old single-shot decrypt path must accept the streamed output
+    nonce, ciphertext = blob[:AES_NONCE_SIZE], blob[AES_NONCE_SIZE:]
+    assert AESGCM(key).decrypt(nonce, ciphertext, None) == data
+
+    # And the streamed decrypt must accept single-shot output
+    nonce2 = os.urandom(AES_NONCE_SIZE)
+    legacy = tmp_path / "legacy.enc"
+    legacy.write_bytes(nonce2 + AESGCM(key).encrypt(nonce2, data, None))
+    dec = tmp_path / "dec.bin"
+    aes_decrypt_file(legacy, dec, key)
+    assert dec.read_bytes() == data
+
+
+def test_aes_decrypt_failure_removes_dest(tmp_path):
+    """A failed (tampered) decrypt must not leave partial plaintext behind."""
+    key = os.urandom(32)
+    src = tmp_path / "plain.bin"
+    src.write_bytes(b"sensitive data" * 100)
+    enc = tmp_path / "enc.bin"
+    aes_encrypt_file(src, enc, key)
+
+    blob = bytearray(enc.read_bytes())
+    blob[20] ^= 0xFF  # corrupt ciphertext
+    enc.write_bytes(bytes(blob))
+
+    dec = tmp_path / "dec.bin"
+    with pytest.raises(Exception):
+        aes_decrypt_file(enc, dec, key)
+    assert not dec.exists()
