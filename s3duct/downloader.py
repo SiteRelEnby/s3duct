@@ -493,15 +493,80 @@ def run_delete(
     tracker.finish(f"Done. Deleted {deleted}/{len(keys_to_delete)} objects.")
 
 
+def _deep_verify_chunk(
+    chunk_rec: ChunkRecord,
+    chunk_path: Path,
+    manifest: Manifest,
+    decrypt_method: str | None,
+    aes_key: bytes | None,
+    age_identity: str | None,
+    prev_chain: bytes | None,
+) -> tuple[str | None, bytes | None, bool]:
+    """Hash-verify one downloaded chunk.
+
+    Returns (error message or None, updated prev_chain, plaintext_checked).
+    """
+    if manifest.encrypted:
+        # Ciphertext checks (no key needed)
+        if chunk_rec.encrypted_size is not None:
+            actual = chunk_path.stat().st_size
+            if actual != chunk_rec.encrypted_size:
+                return (f"encrypted size mismatch: expected "
+                        f"{chunk_rec.encrypted_size}, got {actual}"), prev_chain, False
+        if chunk_rec.encrypted_sha256 is not None:
+            if sha256_file(chunk_path) != chunk_rec.encrypted_sha256:
+                return "encrypted SHA-256 mismatch", prev_chain, False
+
+        if decrypt_method is None:
+            # No key: ciphertext checks are all we can do
+            checked = (chunk_rec.encrypted_size is not None
+                       or chunk_rec.encrypted_sha256 is not None)
+            return (None if checked else "no key and no ciphertext hashes recorded"
+                    ), prev_chain, False
+
+        dec_path = chunk_path.with_suffix(".dec")
+        try:
+            if decrypt_method == "aes-256-gcm":
+                aes_decrypt_file(chunk_path, dec_path, aes_key)
+            else:
+                age_decrypt_file(chunk_path, dec_path, age_identity)
+        except Exception as e:
+            return f"decryption failed: {e}", prev_chain, False
+        plain_path = dec_path
+    else:
+        plain_path = chunk_path
+
+    try:
+        dual_hash, size = hash_file(plain_path)
+        expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
+        if dual_hash != expected:
+            return "plaintext hash mismatch", prev_chain, True
+        if size != chunk_rec.size:
+            return f"size mismatch: expected {chunk_rec.size}, got {size}", prev_chain, True
+        prev_chain = bytes.fromhex(compute_chain(dual_hash, prev_chain))
+        return None, prev_chain, True
+    finally:
+        if manifest.encrypted:
+            plain_path.unlink(missing_ok=True)
+
+
 def run_verify(
     backend: StorageBackend,
     name: str,
     aes_key: bytes | None = None,
     age_identity: str | None = None,
     summary: str = "text",  # "text", "json", or "none"
+    deep: bool = False,
+    scratch_dir: Path | None = None,
     tracker: ProgressTracker | None = None,
 ) -> None:
-    """Verify integrity of a stored stream without downloading chunk data."""
+    """Verify integrity of a stored stream.
+
+    Default mode compares ETags via HEAD requests (no data transfer).
+    Deep mode downloads every chunk and verifies content hashes: ciphertext
+    SHA-256/size always (when recorded), plus plaintext dual-hash and the
+    full integrity chain when the stream is unencrypted or a key is given.
+    """
     if tracker is None:
         tracker = PlainProgress()
 
@@ -512,32 +577,87 @@ def run_verify(
 
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
+    run_scratch: Path | None = None
+    decrypt_method: str | None = None
+    if deep:
+        if scratch_dir is None:
+            scratch_dir = SCRATCH_DIR
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        run_scratch = Path(tempfile.mkdtemp(prefix="verify-", dir=scratch_dir))
+        if manifest.encrypted:
+            method = manifest.encryption_method or "age"
+            if method == "aes-256-gcm" and aes_key:
+                decrypt_method = method
+            elif method == "age" and age_identity:
+                decrypt_method = method
+            else:
+                tracker.log(
+                    "No decryption key provided: deep verify will check "
+                    "ciphertext hashes only (plaintext hashes and chain "
+                    "require --key/--age-identity)."
+                )
+
     tracker.start(None, manifest.chunk_count, "Verifying")
     errors = 0
     mismatches = []
     missing = []
+    prev_chain: bytes | None = None
+    plaintext_verified = deep  # falsified if any chunk skips plaintext checks
 
-    for chunk_rec in manifest.chunks:
-        try:
-            info = backend.head_object(chunk_rec.s3_key)
+    try:
+        for chunk_rec in manifest.chunks:
+            try:
+                info = backend.head_object(chunk_rec.s3_key)
+            except Exception as e:
+                tracker.log(f"  MISSING chunk {chunk_rec.index}: {e}")
+                missing.append(chunk_rec.index)
+                errors += 1
+                continue
+
             if info.etag != chunk_rec.etag:
                 tracker.log(f"  MISMATCH chunk {chunk_rec.index}: ETag differs")
                 mismatches.append(chunk_rec.index)
                 errors += 1
-            else:
-                tracker.update_chunk(chunk_rec.index, chunk_rec.size)
-        except Exception as e:
-            tracker.log(f"  MISSING chunk {chunk_rec.index}: {e}")
-            missing.append(chunk_rec.index)
-            errors += 1
+                continue
+
+            if deep:
+                chunk_path = run_scratch / f"chunk-{chunk_rec.index:06d}"
+                try:
+                    backend.download(chunk_rec.s3_key, chunk_path)
+                    err, prev_chain, plain_checked = _deep_verify_chunk(
+                        chunk_rec, chunk_path, manifest, decrypt_method,
+                        aes_key, age_identity, prev_chain,
+                    )
+                finally:
+                    chunk_path.unlink(missing_ok=True)
+                if not plain_checked:
+                    plaintext_verified = False
+                if err:
+                    tracker.log(f"  MISMATCH chunk {chunk_rec.index}: {err}")
+                    mismatches.append(chunk_rec.index)
+                    errors += 1
+                    continue
+
+            tracker.update_chunk(chunk_rec.index, chunk_rec.size)
+
+        # Final chain check (only meaningful if every chunk was plaintext-checked)
+        if deep and plaintext_verified and not errors and manifest.final_chain:
+            if prev_chain is None or prev_chain.hex() != manifest.final_chain:
+                tracker.log("  MISMATCH: final chain differs from manifest")
+                errors += 1
+    finally:
+        if run_scratch is not None:
+            shutil.rmtree(run_scratch, ignore_errors=True)
 
     if summary == "json":
         click.echo(json.dumps({
             "version": __version__,
             "status": "fail" if errors else "ok",
             "stream": name,
+            "deep": deep,
+            "chain_verified": deep and plaintext_verified and not errors,
             "chunks_total": manifest.chunk_count,
-            "chunks_ok": manifest.chunk_count - errors,
+            "chunks_ok": manifest.chunk_count - len(mismatches) - len(missing),
             "chunks_mismatched": mismatches,
             "chunks_missing": missing,
             "errors": errors,
@@ -547,7 +667,9 @@ def run_verify(
         if errors:
             tracker.finish(f"Verification failed: {errors} error(s).")
         else:
-            tracker.finish("All chunks verified.")
+            tracker.finish(
+                "All chunks verified (deep)." if deep else "All chunks verified."
+            )
     else:
         tracker.finish()
 
