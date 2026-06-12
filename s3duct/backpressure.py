@@ -58,12 +58,20 @@ class BackpressureMonitor:
         return self._effective_limit
 
     def scratch_usage(self) -> int:
-        """Current bytes used in scratch dir."""
-        return sum(
-            f.stat().st_size
-            for f in self._config.scratch_dir.iterdir()
-            if f.is_file()
-        )
+        """Current bytes used in scratch dir.
+
+        Worker threads delete files (plaintext after encryption, chunks
+        after upload) concurrently with this scan, so files may vanish
+        between iterdir and stat — treat those as gone.
+        """
+        total = 0
+        for f in self._config.scratch_dir.iterdir():
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                continue
+        return total
 
     def free_disk_space(self) -> int:
         """Free space on the filesystem containing scratch_dir."""
