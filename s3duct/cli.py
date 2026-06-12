@@ -1,5 +1,6 @@
 """CLI entry point for s3duct."""
 
+import re
 import sys
 
 import click
@@ -8,15 +9,57 @@ from s3duct import __version__
 from s3duct.backends.s3 import S3Backend
 from s3duct.config import DEFAULT_CHUNK_SIZE, DEFAULT_STORAGE_CLASS, MAX_RETRY_ATTEMPTS
 
+_SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?B?)$")
+
 
 def parse_size(value: str) -> int:
-    """Parse a human-readable size string (e.g., '512M', '1G') to bytes."""
-    value = value.strip().upper()
-    multipliers = {"B": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-    for suffix, mult in multipliers.items():
-        if value.endswith(suffix):
-            return int(float(value[:-1]) * mult)
-    return int(value)
+    """Parse a human-readable size string (e.g., '512M', '1.5G', '100MB') to bytes."""
+    m = _SIZE_RE.match(value.strip().upper())
+    if not m:
+        raise click.BadParameter(
+            f"Invalid size: {value!r}. Use a number with an optional "
+            "K/M/G/T suffix, e.g. 512M or 1.5G."
+        )
+    multipliers = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    suffix = m.group(2).rstrip("B")
+    size = int(float(m.group(1)) * multipliers[suffix])
+    if size <= 0:
+        raise click.BadParameter(f"Size must be positive: {value!r}")
+    return size
+
+
+def _validate_retries(ctx, param, value):
+    if value is not None and value < 1:
+        raise click.BadParameter("must be >= 1")
+    return value
+
+
+def _resolve_workers(value: str, min_w: int | None, max_w: int | None,
+                     flag: str) -> int | str:
+    """Validate --<flag>-workers and its min/max companion options."""
+    parsed: int | str = value
+    if value != "auto":
+        try:
+            parsed = int(value)
+        except ValueError:
+            raise click.ClickException(
+                f"--{flag}-workers must be 'auto' or a positive integer, got: {value!r}"
+            )
+        if parsed < 1:
+            raise click.ClickException(f"--{flag}-workers must be >= 1")
+        if min_w is not None:
+            raise click.ClickException(
+                f"--min-{flag}-workers only applies when --{flag}-workers is 'auto'"
+            )
+        if max_w is not None:
+            raise click.ClickException(
+                f"--max-{flag}-workers only applies when --{flag}-workers is 'auto'"
+            )
+    if min_w is not None and max_w is not None and min_w > max_w:
+        raise click.ClickException(
+            f"--min-{flag}-workers must be <= --max-{flag}-workers"
+        )
+    return parsed
 
 
 @click.group()
@@ -53,6 +96,8 @@ def validate_name(name: str) -> None:
         raise click.BadParameter(f"Stream name should not start with '/' or '.': {name!r}")
     if "//" in name:
         raise click.BadParameter(f"Stream name should not contain '//': {name!r}")
+    if any(part == ".." for part in name.split("/")):
+        raise click.BadParameter(f"Stream name should not contain '..' segments: {name!r}")
 
 
 def parse_tag(value: str) -> tuple[str, str]:
@@ -83,7 +128,7 @@ def parse_tag(value: str) -> tuple[str, str]:
 @click.option("--diskspace-limit", default=None, help="Max scratch disk usage (e.g., 2G). Must be >= chunk-size.")
 @click.option("--buffer-chunks", default=None, type=int, help="Max buffered chunks in scratch (default: auto).")
 @click.option("--strict-resume/--no-strict-resume", default=True, help="Fail if stdin ends before all resume-log chunks are re-verified (default: on).")
-@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--upload-workers", default="auto", help="Parallel upload threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
 @click.option("--min-upload-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
 @click.option("--max-upload-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
@@ -161,25 +206,8 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
     backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
                         endpoint_url=endpoint_url, max_retries=retries,
                         bandwidth_limit=parsed_bandwidth)
-    # Parse upload_workers: "auto" or an integer
-    parsed_workers: int | str = upload_workers
-    if upload_workers != "auto":
-        try:
-            parsed_workers = int(upload_workers)
-            if parsed_workers < 1:
-                raise click.ClickException("--upload-workers must be >= 1")
-        except ValueError:
-            raise click.ClickException(
-                f"--upload-workers must be 'auto' or a positive integer, got: {upload_workers!r}"
-            )
-
-    if min_upload_workers is not None and upload_workers != "auto":
-        raise click.ClickException("--min-upload-workers only applies when --upload-workers is 'auto'")
-    if max_upload_workers is not None and upload_workers != "auto":
-        raise click.ClickException("--max-upload-workers only applies when --upload-workers is 'auto'")
-    if (min_upload_workers is not None and max_upload_workers is not None
-            and min_upload_workers > max_upload_workers):
-        raise click.ClickException("--min-upload-workers must be <= --max-upload-workers")
+    parsed_workers = _resolve_workers(
+        upload_workers, min_upload_workers, max_upload_workers, "upload")
 
     from s3duct.progress import get_tracker
     effective_progress = "none" if quiet else progress_mode
@@ -227,7 +255,7 @@ def put(bucket, name, chunk_size, key, age_identity, no_encrypt, encrypt_manifes
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
 @click.option("--scratch-dir", type=click.Path(), default=None, help="Directory for temporary chunk files (default: ~/.s3duct/scratch).")
-@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--download-workers", default="auto", help="Parallel download threads. 'auto' adapts based on throughput (default). Use an integer for fixed concurrency.")
 @click.option("--min-download-workers", default=None, type=int, help="Minimum workers for auto mode (default: 2).")
 @click.option("--max-download-workers", default=None, type=int, help="Maximum workers for auto mode (default: 16).")
@@ -258,25 +286,8 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
     elif age_identity:
         encryption_method = "age"
 
-    # Parse download_workers: "auto" or an integer
-    parsed_workers: int | str = download_workers
-    if download_workers != "auto":
-        try:
-            parsed_workers = int(download_workers)
-            if parsed_workers < 1:
-                raise click.ClickException("--download-workers must be >= 1")
-        except ValueError:
-            raise click.ClickException(
-                f"--download-workers must be 'auto' or a positive integer, got: {download_workers!r}"
-            )
-
-    if min_download_workers is not None and download_workers != "auto":
-        raise click.ClickException("--min-download-workers only applies when --download-workers is 'auto'")
-    if max_download_workers is not None and download_workers != "auto":
-        raise click.ClickException("--max-download-workers only applies when --download-workers is 'auto'")
-    if (min_download_workers is not None and max_download_workers is not None
-            and min_download_workers > max_download_workers):
-        raise click.ClickException("--min-download-workers must be <= --max-download-workers")
+    parsed_workers = _resolve_workers(
+        download_workers, min_download_workers, max_download_workers, "download")
 
     from pathlib import Path
     from s3duct.progress import get_tracker
@@ -326,7 +337,7 @@ def list_cmd(bucket, prefix, region, endpoint_url):
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
-@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
 @click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress and summary output.")
@@ -365,7 +376,7 @@ def verify(bucket, name, key, age_identity, region, prefix, endpoint_url, retrie
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
-@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
 @click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")
@@ -413,7 +424,7 @@ def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endp
 @click.option("--region", default=None, help="AWS region.")
 @click.option("--prefix", default="", help="S3 key prefix.")
 @click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
-@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
 @click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
 @click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")

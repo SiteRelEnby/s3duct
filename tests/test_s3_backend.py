@@ -163,3 +163,21 @@ def test_on_throttle_not_invoked_on_other_errors():
     backend._client = FakeClient()
     backend.upload_bytes("k", b"data")
     assert calls == []
+
+
+def test_head_object_missing_raises_file_not_found(s3_env):
+    backend, _ = s3_env
+    with pytest.raises(FileNotFoundError):
+        backend.head_object("does/not/exist")
+
+
+def test_download_bytes_missing_raises_file_not_found(s3_env):
+    backend, _ = s3_env
+    with pytest.raises(FileNotFoundError):
+        backend.download_bytes("does/not/exist")
+
+
+def test_download_missing_raises_file_not_found(s3_env, tmp_path):
+    backend, _ = s3_env
+    with pytest.raises(FileNotFoundError):
+        backend.download("does/not/exist", tmp_path / "out.bin")

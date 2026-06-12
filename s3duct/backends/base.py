@@ -34,12 +34,18 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def download(self, key: str, dest_path: Path) -> None:
-        """Download an object to a local file."""
+        """Download an object to a local file.
+
+        Raises FileNotFoundError if the object does not exist.
+        """
         ...
 
     @abstractmethod
     def download_bytes(self, key: str) -> bytes:
-        """Download an object as bytes."""
+        """Download an object as bytes.
+
+        Raises FileNotFoundError if the object does not exist.
+        """
         ...
 
     @abstractmethod
@@ -49,7 +55,10 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def head_object(self, key: str) -> ObjectInfo:
-        """Get metadata for a single object."""
+        """Get metadata for a single object.
+
+        Raises FileNotFoundError if the object does not exist.
+        """
         ...
 
     @abstractmethod

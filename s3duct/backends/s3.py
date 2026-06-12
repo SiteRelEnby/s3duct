@@ -39,6 +39,16 @@ _THROTTLE_CODES = frozenset({
     "Throttling", "TooManyRequestsException",
 })
 
+# ClientError codes meaning the object does not exist; translated to
+# FileNotFoundError per the StorageBackend contract
+_NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+def _raise_if_not_found(exc: Exception, key: str) -> None:
+    if (isinstance(exc, ClientError)
+            and exc.response["Error"].get("Code", "") in _NOT_FOUND_CODES):
+        raise FileNotFoundError(f"No such object: {key}") from exc
+
 
 def _is_retryable(exc: Exception) -> bool:
     """Check if an exception is worth retrying."""
@@ -161,6 +171,7 @@ class S3Backend(StorageBackend):
                 self._client.download_file(self._bucket, full_key, str(dest_path), Config=config)
                 return
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                _raise_if_not_found(e, key)
                 self._notify_if_throttle(e)
                 if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
@@ -174,6 +185,7 @@ class S3Backend(StorageBackend):
                 resp = self._client.get_object(Bucket=self._bucket, Key=full_key)
                 return resp["Body"].read()
             except (*_RETRYABLE_TRANSPORT, ClientError) as e:
+                _raise_if_not_found(e, key)
                 self._notify_if_throttle(e)
                 if not _is_retryable(e) or attempt == self._max_retries - 1:
                     raise
@@ -199,7 +211,11 @@ class S3Backend(StorageBackend):
 
     def head_object(self, key: str) -> ObjectInfo:
         full_key = self._full_key(key)
-        resp = self._client.head_object(Bucket=self._bucket, Key=full_key)
+        try:
+            resp = self._client.head_object(Bucket=self._bucket, Key=full_key)
+        except ClientError as e:
+            _raise_if_not_found(e, key)
+            raise
         return ObjectInfo(
             key=key,
             size=resp["ContentLength"],

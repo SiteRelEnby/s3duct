@@ -6,7 +6,7 @@ import click
 from botocore.exceptions import ClientError
 
 from s3duct.backends.base import StorageBackend
-from s3duct.downloader import _decrypt_manifest
+from s3duct.downloader import _decrypt_manifest, _fetch_manifest_bytes
 from s3duct.manifest import Manifest
 from s3duct.progress import ProgressTracker, PlainProgress
 
@@ -34,7 +34,7 @@ def run_restore(
     # Download and parse manifest
     manifest_key = Manifest.s3_key(name)
     tracker.log("Downloading manifest...")
-    raw = backend.download_bytes(manifest_key)
+    raw = _fetch_manifest_bytes(backend, name, manifest_key)
     manifest = _decrypt_manifest(raw, aes_key=aes_key, age_identity=age_identity)
 
     total = manifest.chunk_count

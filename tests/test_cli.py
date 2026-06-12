@@ -42,6 +42,24 @@ def test_parse_size_whitespace():
     assert parse_size("  512M  ") == 512 * 1024 ** 2
 
 
+def test_parse_size_two_letter_suffix():
+    assert parse_size("100MB") == 100 * 1024 ** 2
+    assert parse_size("2GB") == 2 * 1024 ** 3
+
+
+def test_parse_size_invalid_raises_click_error():
+    import click
+    for bad in ("garbage", "-5M", "12Q", ""):
+        with pytest.raises(click.ClickException):
+            parse_size(bad)
+
+
+def test_parse_size_zero_rejected():
+    import click
+    with pytest.raises(click.ClickException):
+        parse_size("0")
+
+
 def test_cli_help():
     runner = CliRunner()
     result = runner.invoke(main, ["--help"])
@@ -153,6 +171,22 @@ def test_validate_name_bad_prefix():
 def test_validate_name_double_slash():
     with pytest.raises(Exception):
         validate_name("bad//path")
+
+
+def test_validate_name_dotdot_segment():
+    with pytest.raises(Exception):
+        validate_name("foo/../bar")
+    with pytest.raises(Exception):
+        validate_name("foo/..")
+
+
+def test_cli_put_rejects_zero_retries():
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "put", "--bucket", "b", "--name", "n", "--no-encrypt", "--retries", "0",
+    ], input="")
+    assert result.exit_code != 0
+    assert "retries" in result.output.lower()
 
 
 def test_cli_put_empty_name():
