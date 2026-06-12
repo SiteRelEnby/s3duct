@@ -2,8 +2,10 @@
 
 import json as _json
 import os
+import shutil
 import stat
 import sys
+import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -196,17 +198,6 @@ def run_put(
     # Check expected stdin size for regular files
     expected_stdin_size = _stdin_expected_size()
 
-    # Set up backpressure — need at least (workers+1) buffer chunks
-    min_buf = effective_workers + 1 if not adaptive else user_max + 1
-    bp_config = BackpressureConfig(
-        chunk_size=chunk_size,
-        scratch_dir=scratch_dir,
-        max_buffer_chunks=buffer_chunks,
-        diskspace_limit=diskspace_limit,
-        min_buffer_chunks=min_buf,
-    )
-    bp_monitor = BackpressureMonitor(bp_config)
-
     # Resolve encryption
     recipient = None
     if encrypt and encryption_method == "age":
@@ -333,6 +324,22 @@ def run_put(
     tracker.start(total_size, 0, "Uploading", chunk_size=chunk_size)
     tracker.set_workers(effective_workers)
 
+    # Per-run scratch subdirectory: isolates concurrent s3duct processes
+    # (chunk filenames would otherwise collide) and keeps leftover files from
+    # crashed runs out of this run's backpressure accounting
+    run_scratch = Path(tempfile.mkdtemp(prefix="put-", dir=scratch_dir))
+
+    # Set up backpressure — need at least (workers+1) buffer chunks
+    min_buf = effective_workers + 1 if not adaptive else user_max + 1
+    bp_config = BackpressureConfig(
+        chunk_size=chunk_size,
+        scratch_dir=run_scratch,
+        max_buffer_chunks=buffer_chunks,
+        diskspace_limit=diskspace_limit,
+        min_buffer_chunks=min_buf,
+    )
+    bp_monitor = BackpressureMonitor(bp_config)
+
     # Set up adaptive throttle or fixed pool
     throttle = AdaptiveThrottle(effective_workers, user_min, user_max, tracker=tracker) if adaptive else None
     if throttle:
@@ -377,7 +384,7 @@ def run_put(
             read_start = time.monotonic()
 
             for chunk_info in chunk_stream(
-                sys.stdin.buffer, chunk_size, scratch_dir, stream_hasher,
+                sys.stdin.buffer, chunk_size, run_scratch, stream_hasher,
                 pre_chunk_hook=_bp_hook,
             ):
                 # Exclude backpressure wait so the throttle sees pure read time
@@ -460,6 +467,7 @@ def run_put(
         # Clean up deferred files after pool threads have stopped
         for p in _deferred_cleanup:
             p.unlink(missing_ok=True)
+        shutil.rmtree(run_scratch, ignore_errors=True)
 
     if chunks_uploaded == 0:
         tracker.finish("No data received on stdin.")

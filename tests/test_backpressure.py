@@ -1,7 +1,5 @@
 """Tests for s3duct.backpressure."""
 
-import threading
-import time
 
 import pytest
 
@@ -83,31 +81,17 @@ def test_effective_limit_buffer_chunks(tmp_path):
     assert mon.effective_limit == 320  # 5 * 64
 
 
-def test_wait_for_space_unblocks(tmp_path):
-    """wait_for_space should unblock when a file is deleted."""
+def test_can_write_chunk_unblocks_after_delete(tmp_path):
+    """can_write_chunk should flip back to True when a file is deleted."""
     blocker = tmp_path / "chunk-000000"
     blocker.write_bytes(b"x" * 64)
     cfg = BackpressureConfig(chunk_size=64, scratch_dir=tmp_path, max_buffer_chunks=1,
                              min_buffer_chunks=1)
     mon = BackpressureMonitor(cfg)
 
-    unblocked = threading.Event()
-
-    def waiter():
-        mon.wait_for_space(poll_interval=0.05)
-        unblocked.set()
-
-    t = threading.Thread(target=waiter)
-    t.start()
-
-    # Should still be blocked
-    time.sleep(0.1)
-    assert not unblocked.is_set()
-
-    # Free space
+    assert not mon.can_write_chunk()
     blocker.unlink()
-    t.join(timeout=2.0)
-    assert unblocked.is_set()
+    assert mon.can_write_chunk()
 
 
 def test_cli_diskspace_limit_validation():
