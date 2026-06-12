@@ -3,6 +3,7 @@
 import hashlib
 import shutil
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from s3duct.backends.base import ObjectInfo, StorageBackend
@@ -68,6 +69,7 @@ class LocalBackend(StorageBackend):
             key = rel[len(self._prefix):] if self._prefix and rel.startswith(self._prefix) else rel
             results.append(ObjectInfo(
                 key=key, size=len(data), etag=self._etag(data),
+                last_modified=datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc),
             ))
         return results
 

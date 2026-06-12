@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -13,6 +14,7 @@ class ObjectInfo:
     etag: str
     storage_class: str | None = None
     restore_status: str | None = None
+    last_modified: datetime | None = None
 
 
 class StorageBackend(ABC):
