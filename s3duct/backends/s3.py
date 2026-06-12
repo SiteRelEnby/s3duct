@@ -229,6 +229,7 @@ class S3Backend(StorageBackend):
                     size=obj["Size"],
                     etag=obj["ETag"],
                     storage_class=obj.get("StorageClass"),
+                    last_modified=obj.get("LastModified"),
                 ))
         return objects
 
@@ -245,6 +246,7 @@ class S3Backend(StorageBackend):
             etag=resp["ETag"],
             storage_class=resp.get("StorageClass"),
             restore_status=resp.get("Restore"),
+            last_modified=resp.get("LastModified"),
         )
 
     def delete_object(self, key: str) -> None:

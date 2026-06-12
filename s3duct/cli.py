@@ -430,6 +430,102 @@ def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endp
 
 @main.command()
 @click.option("--bucket", required=True, help="S3 bucket name.")
+@click.option("--older-than", default=7.0, type=float, help="Only delete orphans older than this many days (default: 7). Protects in-progress uploads.")
+@click.option("--dry-run", is_flag=True, default=False, help="List what would be deleted without deleting.")
+@click.option("--force", is_flag=True, default=False, help="Skip confirmation prompt.")
+@click.option("--key", default=None, help="AES-256-GCM key, to read encrypted manifests (hex:..., file:..., or env:...).")
+@click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file, to read encrypted manifests.")
+@click.option("--region", default=None, help="AWS region.")
+@click.option("--prefix", default="", help="S3 key prefix.")
+@click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")
+def gc(bucket, older_than, dry_run, force, key, age_identity, region, prefix, endpoint_url,
+       retries, progress_mode, verbose, quiet):
+    """Delete orphaned chunks not referenced by any manifest.
+
+    Orphans come from interrupted uploads that were never resumed, or
+    --clobber re-uploads that left extra chunks behind. Streams with
+    unreadable (encrypted) manifests are skipped unless a key is given;
+    objects newer than --older-than days are never touched, so a
+    currently-running upload is safe.
+    """
+    from s3duct.encryption import parse_key
+    from s3duct.maintenance import run_gc
+
+    if key and age_identity:
+        raise click.ClickException("--key and --age-identity are mutually exclusive.")
+    aes_key = parse_key(key) if key else None
+
+    if not dry_run and not force:
+        click.confirm(
+            f"Delete orphaned chunks older than {older_than} day(s) from s3://{bucket}?",
+            abort=True,
+            err=True,
+        )
+
+    effective_progress = "none" if quiet else progress_mode
+    from s3duct.progress import get_tracker
+    tracker = get_tracker(effective_progress, verbose=verbose)
+
+    backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
+                        endpoint_url=endpoint_url, max_retries=retries)
+    run_gc(backend, older_than_days=older_than, dry_run=dry_run,
+           aes_key=aes_key, age_identity=age_identity, tracker=tracker)
+
+
+@main.command()
+@click.option("--bucket", required=True, help="S3 bucket name.")
+@click.option("--keep", required=True, type=int, help="Number of newest streams to keep.")
+@click.option("--stream-prefix", default="", help="Only consider streams whose name starts with this prefix (e.g. 'daily/').")
+@click.option("--dry-run", is_flag=True, default=False, help="List what would be deleted without deleting.")
+@click.option("--force", is_flag=True, default=False, help="Skip confirmation prompt.")
+@click.option("--key", default=None, help="AES-256-GCM key, to read encrypted manifests (hex:..., file:..., or env:...).")
+@click.option("--age-identity", type=click.Path(exists=True), help="Path to age identity file, to read encrypted manifests.")
+@click.option("--region", default=None, help="AWS region.")
+@click.option("--prefix", default="", help="S3 key prefix.")
+@click.option("--endpoint-url", default=None, help="Custom S3 endpoint (for R2, MinIO, etc.).")
+@click.option("--retries", default=MAX_RETRY_ATTEMPTS, type=int, callback=_validate_retries, help=f"Max retry attempts per S3 operation (default: {MAX_RETRY_ATTEMPTS}).")
+@click.option("--progress", "progress_mode", type=click.Choice(["auto", "rich", "plain", "none"]), default="auto", help="Progress display mode (default: auto-detect TTY).")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Show detailed progress events and timing.")
+@click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")
+def prune(bucket, keep, stream_prefix, dry_run, force, key, age_identity, region, prefix,
+          endpoint_url, retries, progress_mode, verbose, quiet):
+    """Keep the newest N streams; delete the rest.
+
+    Backup rotation: 'prune --stream-prefix daily/ --keep 7' keeps the
+    seven newest daily streams (by manifest creation time) and deletes
+    older ones. Streams with unreadable manifests are never deleted.
+    """
+    from s3duct.encryption import parse_key
+    from s3duct.maintenance import run_prune
+
+    if key and age_identity:
+        raise click.ClickException("--key and --age-identity are mutually exclusive.")
+    aes_key = parse_key(key) if key else None
+
+    if not dry_run and not force:
+        click.confirm(
+            f"Delete all but the newest {keep} stream(s) matching "
+            f"{stream_prefix!r} from s3://{bucket}?",
+            abort=True,
+            err=True,
+        )
+
+    effective_progress = "none" if quiet else progress_mode
+    from s3duct.progress import get_tracker
+    tracker = get_tracker(effective_progress, verbose=verbose)
+
+    backend = S3Backend(bucket=bucket, region=region, prefix=prefix,
+                        endpoint_url=endpoint_url, max_retries=retries)
+    run_prune(backend, keep=keep, stream_prefix=stream_prefix, dry_run=dry_run,
+              aes_key=aes_key, age_identity=age_identity, tracker=tracker)
+
+
+@main.command()
+@click.option("--bucket", required=True, help="S3 bucket name.")
 @click.option("--name", required=True, help="Stream name to restore from Glacier.")
 @click.option("--days", default=7, type=int, help="Days to keep restored copies (default: 7).")
 @click.option("--tier", default="Standard",
