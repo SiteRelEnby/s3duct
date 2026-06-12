@@ -50,7 +50,34 @@ dev = [
     "pytest>=7.0",
     "moto[s3]>=4.0",
     "pytest-asyncio>=0.21",
+    "ruff>=0.8",
+    "mypy>=1.13",
 ]
 
 [tool.setuptools.packages.find]
 include = ["s3duct*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # long lines: option help strings are clearer unwrapped
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "B017",  # pytest.raises(Exception) is fine for "any error" assertions
+    "B023",  # closure-over-loop-var is deliberate in retry-abort fixtures
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["s3duct"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true

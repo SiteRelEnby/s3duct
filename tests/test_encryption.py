@@ -2,14 +2,20 @@
 
 import os
 import subprocess
+
 import pytest
 
 from s3duct.encryption import (
-    age_available, age_encrypt_file, age_decrypt_file, get_recipient_from_identity,
-    age_encrypt_manifest, age_decrypt_manifest,
-    aes_encrypt_file, aes_decrypt_file, parse_key,
+    aes_decrypt_file,
+    aes_encrypt_file,
+    age_available,
+    age_decrypt_file,
+    age_decrypt_manifest,
+    age_encrypt_file,
+    age_encrypt_manifest,
+    get_recipient_from_identity,
+    parse_key,
 )
-
 
 skip_no_age = pytest.mark.skipif(not age_available(), reason="age CLI not installed")
 
@@ -219,6 +225,7 @@ def test_aes_streaming_format_matches_single_shot(tmp_path):
     """Streamed encryption output must stay byte-compatible with the
     single-shot AESGCM format (nonce + ciphertext + tag)."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
     from s3duct.encryption import AES_NONCE_SIZE
 
     key = os.urandom(32)

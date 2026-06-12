@@ -11,9 +11,7 @@ from moto import mock_aws
 from s3duct.backends.s3 import S3Backend
 from s3duct.encryption import age_available
 from s3duct.manifest import Manifest
-from s3duct.resume import ResumeLog
 from s3duct.uploader import run_put
-
 
 CHUNK_SIZE = 64
 skip_no_age = pytest.mark.skipif(not age_available(), reason="age CLI not installed")
@@ -248,7 +246,6 @@ def test_run_put_encrypted_manifest(upload_env):
 
 def test_run_put_regular_file_size_check(upload_env, tmp_path, capsys):
     """When stdin is a regular file, warn if bytes read != file size."""
-    import os
     backend, client, scratch, session, mp = upload_env
     data = b"file content for size check" * 3
 
@@ -463,7 +460,7 @@ def test_run_put_encrypt_manifest_opt_out(upload_env):
 def test_run_put_age_encrypted(upload_env, tmp_path):
     """Test upload with age encryption."""
     import subprocess
-    from s3duct.encryption import get_recipient_from_identity
+
 
     backend, client, scratch, session, mp = upload_env
     data = b"age encrypt me" * 5

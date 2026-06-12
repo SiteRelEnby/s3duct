@@ -97,6 +97,7 @@ def test_can_write_chunk_unblocks_after_delete(tmp_path):
 def test_cli_diskspace_limit_validation():
     """CLI should reject --diskspace-limit below --chunk-size."""
     from click.testing import CliRunner
+
     from s3duct.cli import main
 
     runner = CliRunner()

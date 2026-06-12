@@ -8,9 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-import pytest
-
-from s3duct.manifest import ChunkRecord, Manifest
+from s3duct.manifest import Manifest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "compat"
 

@@ -7,7 +7,7 @@ import click
 
 from s3duct import __version__
 from s3duct.backends.s3 import S3Backend
-from s3duct.config import DEFAULT_CHUNK_SIZE, DEFAULT_STORAGE_CLASS, MAX_RETRY_ATTEMPTS
+from s3duct.config import DEFAULT_STORAGE_CLASS, MAX_RETRY_ATTEMPTS
 
 _SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?B?)$")
 
@@ -44,7 +44,7 @@ def _resolve_workers(value: str, min_w: int | None, max_w: int | None,
         except ValueError:
             raise click.ClickException(
                 f"--{flag}-workers must be 'auto' or a positive integer, got: {value!r}"
-            )
+            ) from None
         if parsed < 1:
             raise click.ClickException(f"--{flag}-workers must be >= 1")
         if min_w is not None:
@@ -84,6 +84,8 @@ def completion(shell: str) -> None:
     """
     from click.shell_completion import get_completion_class
     comp_cls = get_completion_class(shell)
+    if comp_cls is None:
+        raise click.ClickException(f"No completion support for shell {shell!r}.")
     comp = comp_cls(main, {}, "s3duct", "_S3DUCT_COMPLETE")
     click.echo(comp.source())
 
@@ -270,8 +272,8 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
         retries, download_workers, min_download_workers, max_download_workers, bandwidth_limit,
         progress_mode, verbose, quiet, summary):
     """Download a stream from S3 to stdout."""
-    from s3duct.encryption import parse_key
     from s3duct.downloader import run_get
+    from s3duct.encryption import parse_key
 
     validate_name(name)
 
@@ -292,6 +294,7 @@ def get(bucket, name, key, age_identity, no_decrypt, region, prefix, endpoint_ur
         download_workers, min_download_workers, max_download_workers, "download")
 
     from pathlib import Path
+
     from s3duct.progress import get_tracker
     effective_progress = "none" if quiet else progress_mode
     effective_summary = "none" if quiet else summary
@@ -357,8 +360,9 @@ def verify(bucket, name, deep, key, age_identity, region, prefix, endpoint_url, 
     is provided.
     """
     from pathlib import Path
-    from s3duct.encryption import parse_key
+
     from s3duct.downloader import run_verify
+    from s3duct.encryption import parse_key
 
     validate_name(name)
 
@@ -396,8 +400,8 @@ def verify(bucket, name, deep, key, age_identity, region, prefix, endpoint_url, 
 @click.option("--quiet", "-q", is_flag=True, default=False, help="Suppress progress output.")
 def delete(bucket, name, dry_run, force, key, age_identity, region, prefix, endpoint_url, retries, progress_mode, verbose, quiet):
     """Delete a stream and all its chunks from S3."""
-    from s3duct.encryption import parse_key
     from s3duct.downloader import run_delete
+    from s3duct.encryption import parse_key
 
     validate_name(name)
 

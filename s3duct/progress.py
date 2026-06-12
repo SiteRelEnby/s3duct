@@ -3,11 +3,16 @@
 import sys
 import time
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import click
 
+if TYPE_CHECKING:
+    from rich.progress import TaskID
+    from rich.table import Table
 
-def _format_bytes(n: int) -> str:
+
+def _format_bytes(n: float) -> str:
     """Format bytes as human-readable string."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(n) < 1024:
@@ -108,7 +113,7 @@ class RichProgress(ProgressTracker):
             console=self._console,
             transient=False,
         )
-        self._task_id = None
+        self._task_id: TaskID | None = None
         self._started = False
         self._workers = 0
         self._label = ""
@@ -231,7 +236,6 @@ class RichVerboseProgress(ProgressTracker):
     def __init__(self) -> None:
         from rich.console import Console
         from rich.live import Live
-        from rich.table import Table
 
         self._console = Console(stderr=True)
         self._start_time: float = 0

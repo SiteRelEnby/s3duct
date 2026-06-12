@@ -15,7 +15,6 @@ from pathlib import Path
 import click
 
 from s3duct import __version__
-
 from s3duct.backends.base import StorageBackend
 from s3duct.backpressure import BackpressureConfig, BackpressureMonitor
 from s3duct.chunker import ChunkInfo, chunk_stream, fast_forward_stream
@@ -27,7 +26,7 @@ from s3duct.encryption import (
 )
 from s3duct.integrity import DualHash, StreamHasher, compute_chain, sha256_file
 from s3duct.manifest import ChunkRecord, Manifest
-from s3duct.progress import ProgressTracker, PlainProgress
+from s3duct.progress import PlainProgress, ProgressTracker
 from s3duct.resume import ResumeEntry, ResumeLog
 from s3duct.throttle import AdaptiveThrottle
 
@@ -72,9 +71,11 @@ def _encrypt_chunk(chunk_info: ChunkInfo, encryption_method: str | None,
     Returns (encrypted path, sha256 of the encrypted file).
     """
     if encryption_method == "aes-256-gcm":
+        assert aes_key is not None  # validated in run_put
         enc_path = chunk_info.path.with_suffix(".enc")
         enc_sha256 = aes_encrypt_file(chunk_info.path, enc_path, aes_key)
     elif encryption_method == "age":
+        assert recipient is not None  # resolved in run_put
         enc_path = chunk_info.path.with_suffix(".age")
         age_encrypt_file(chunk_info.path, enc_path, recipient)
         enc_sha256 = sha256_file(enc_path)
@@ -264,7 +265,7 @@ def run_put(
                 f"Stream {name!r} exists but its manifest could not be read "
                 "(encrypted or corrupt). Provide the correct --key/--age-identity "
                 "with --clobber, or delete the stream first with 's3duct delete'."
-            )
+            ) from None
         # Clear stale resume log from any previous attempt
         resume_log.clear()
 

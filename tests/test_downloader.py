@@ -11,7 +11,7 @@ from moto import mock_aws
 from s3duct.backends.s3 import S3Backend
 from s3duct.downloader import run_delete, run_get, run_list, run_verify
 from s3duct.encryption import age_available
-from s3duct.integrity import compute_chain, DualHash
+from s3duct.integrity import DualHash, compute_chain
 from s3duct.manifest import ChunkRecord, Manifest
 
 skip_no_age = pytest.mark.skipif(not age_available(), reason="age CLI not installed")
@@ -193,6 +193,7 @@ def test_run_verify_missing_chunk(download_env):
 def test_run_verify_encrypted_manifest(download_env):
     """Verify should work on streams with encrypted manifests when --key is provided."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -220,6 +221,7 @@ def test_run_verify_encrypted_manifest(download_env):
 def test_run_verify_encrypted_manifest_no_key(download_env):
     """Verify without key on encrypted manifest should fail with helpful message."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -248,8 +250,8 @@ def test_run_verify_encrypted_manifest_no_key(download_env):
 def test_run_get_aes_roundtrip(download_env):
     """Test full upload+download roundtrip with AES-256-GCM encryption."""
     import os
+
     from s3duct.uploader import run_put
-    from s3duct.encryption import aes_encrypt_file
 
     backend, client, scratch, mp = download_env
     data = b"aes roundtrip test data" * 5
@@ -287,6 +289,7 @@ def test_run_get_aes_roundtrip(download_env):
 def test_run_get_no_decrypt_raw_download(download_env):
     """--no-decrypt on an encrypted stream should output raw encrypted chunks without failing."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -328,6 +331,7 @@ def test_run_get_no_decrypt_json_summary(download_env, capsys):
     """JSON summary should report chain_verified=False and raw_mode=True in raw mode."""
     import json
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -364,7 +368,7 @@ def test_run_get_no_decrypt_json_summary(download_env, capsys):
     # Find the JSON line in stderr output
     stderr_capture.seek(0)
     lines = stderr_capture.read().strip().split("\n")
-    json_line = [l for l in lines if l.startswith("{")]
+    json_line = [ln for ln in lines if ln.startswith("{")]
     assert json_line, f"No JSON found in stderr: {lines}"
     report = json.loads(json_line[0])
     assert report["chain_verified"] is False
@@ -375,6 +379,7 @@ def test_run_get_no_decrypt_json_summary(download_env, capsys):
 def test_run_get_encrypted_manifest_aes_roundtrip(download_env):
     """Upload with encrypted manifest, download with key, verify data matches."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -420,6 +425,7 @@ def test_run_get_encrypted_manifest_aes_roundtrip(download_env):
 def test_run_verify_encrypted_manifest_no_credentials(download_env):
     """Verify without any credentials on encrypted manifest should fail with helpful message."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -450,6 +456,7 @@ def test_run_verify_encrypted_manifest_no_credentials(download_env):
 def test_run_get_age_roundtrip(download_env):
     """Full upload+download roundtrip with age encryption."""
     import subprocess
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -491,6 +498,7 @@ def test_run_get_age_roundtrip(download_env):
 def test_run_get_age_encrypted_manifest_roundtrip(download_env):
     """Upload with age + encrypted manifest, download with identity, verify data."""
     import subprocess
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -540,6 +548,7 @@ def test_run_get_age_encrypted_manifest_roundtrip(download_env):
 def test_run_verify_age_encrypted_manifest(download_env):
     """Verify with age-encrypted manifest should work with --age-identity."""
     import subprocess
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -607,6 +616,7 @@ def test_run_delete_dry_run(download_env):
 def test_run_delete_encrypted_manifest(download_env):
     """Delete should work with AES-encrypted manifests."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -691,6 +701,7 @@ def test_run_get_parallel_cleanup(download_env):
 def test_run_get_parallel_encrypted(download_env):
     """Parallel download with AES encryption should produce correct plaintext."""
     import os
+
     from s3duct.uploader import run_put
 
     backend, client, scratch, mp = download_env
@@ -930,6 +941,7 @@ def test_verify_deep_encrypted_without_key_uses_ciphertext_hash(download_env):
 def test_verify_deep_encrypted_with_key_checks_plaintext(download_env, tmp_path):
     """Deep verify with a key decrypts and verifies plaintext + chain."""
     import os
+
     from s3duct.encryption import aes_encrypt_file
 
     backend, client, scratch, mp = download_env
