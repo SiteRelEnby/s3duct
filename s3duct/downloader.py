@@ -1,7 +1,9 @@
 """Download pipeline: S3 -> decrypt -> verify -> stdout."""
 
 import json
+import shutil
 import sys
+import tempfile
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -262,66 +264,56 @@ def run_get(
 
     prev_chain: bytes | None = None
 
-    if effective_workers > 1 or adaptive:
-        # --- Parallel download path ---
-        throttle = AdaptiveThrottle(
-            initial=effective_workers, min_workers=min_w, max_workers=max_w,
-            tracker=tracker,
-        ) if adaptive else None
-        if throttle:
-            backend.on_throttle = throttle.record_throttle
+    throttle = AdaptiveThrottle(
+        initial=effective_workers, min_workers=min_w, max_workers=max_w,
+        tracker=tracker,
+    ) if adaptive else None
+    if throttle:
+        backend.on_throttle = throttle.record_throttle
 
-        pool_size = max_w if adaptive else effective_workers
-        window: list[tuple[_DownloadJob, Future]] = []
-        deferred_cleanup: list[Path] = []
+    pool_size = max_w if adaptive else effective_workers
+    window: list[tuple[_DownloadJob, Future]] = []
+    deferred_cleanup: list[Path] = []
 
-        tracker.set_workers(effective_workers)
-        if adaptive:
-            tracker.log(f"  (workers: auto ({effective_workers}), range {min_w}-{max_w})")
+    tracker.set_workers(effective_workers)
+    if adaptive:
+        tracker.log(f"  (workers: auto ({effective_workers}), range {min_w}-{max_w})")
 
-        def _abort_window() -> None:
-            for remaining_job, remaining_future in window:
-                remaining_future.cancel()
-                deferred_cleanup.append(remaining_job.dest_path)
-                deferred_cleanup.append(remaining_job.dest_path.with_suffix(".dec"))
-            window.clear()
+    def _abort_window() -> None:
+        for remaining_job, remaining_future in window:
+            remaining_future.cancel()
+            deferred_cleanup.append(remaining_job.dest_path)
+            deferred_cleanup.append(remaining_job.dest_path.with_suffix(".dec"))
+        window.clear()
 
-        try:
-            with ThreadPoolExecutor(max_workers=pool_size) as pool:
-                for chunk_rec in manifest.chunks:
-                    chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
-                    job = _DownloadJob(
-                        index=chunk_rec.index,
-                        chunk_rec=chunk_rec,
-                        dest_path=chunk_path,
-                    )
+    # Per-run scratch subdirectory: isolates concurrent s3duct processes
+    # (chunk filenames would otherwise collide)
+    run_scratch = Path(tempfile.mkdtemp(prefix="get-", dir=scratch_dir))
 
-                    if throttle:
-                        throttle.acquire()
+    try:
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
+            for chunk_rec in manifest.chunks:
+                chunk_path = run_scratch / f"chunk-{chunk_rec.index:06d}"
+                job = _DownloadJob(
+                    index=chunk_rec.index,
+                    chunk_rec=chunk_rec,
+                    dest_path=chunk_path,
+                )
 
-                    future = pool.submit(
-                        _download_one, backend, job, decrypt,
-                        manifest.encrypted,
-                        encryption_method or manifest.encryption_method,
-                        aes_key, age_identity, throttle,
-                    )
-                    window.append((job, future))
+                if throttle:
+                    throttle.acquire()
 
-                    # Drain when window is full (backpressure)
-                    max_window = throttle.current_workers if throttle else effective_workers
-                    while len(window) >= max_window:
-                        try:
-                            prev_chain = _drain_oldest(
-                                window, prev_chain, decrypt,
-                                manifest.encrypted, name, throttle,
-                                tracker=tracker,
-                            )
-                        except Exception:
-                            _abort_window()
-                            raise
+                future = pool.submit(
+                    _download_one, backend, job, decrypt,
+                    manifest.encrypted,
+                    encryption_method or manifest.encryption_method,
+                    aes_key, age_identity, throttle,
+                )
+                window.append((job, future))
 
-                # Drain remaining
-                while window:
+                # Drain when window is full (backpressure)
+                max_window = throttle.current_workers if throttle else effective_workers
+                while len(window) >= max_window:
                     try:
                         prev_chain = _drain_oldest(
                             window, prev_chain, decrypt,
@@ -331,73 +323,22 @@ def run_get(
                     except Exception:
                         _abort_window()
                         raise
-        finally:
-            for p in deferred_cleanup:
-                p.unlink(missing_ok=True)
-    else:
-        # --- Sequential download path (workers=1) ---
-        tracker.set_workers(1)
-        for chunk_rec in manifest.chunks:
-            chunk_path = scratch_dir / f"chunk-{chunk_rec.index:06d}"
-            t0 = time.monotonic()
 
-            try:
-                backend.download(chunk_rec.s3_key, chunk_path)
-            except ClientError as e:
-                code = e.response["Error"].get("Code", "")
-                if code == "InvalidObjectState":
-                    raise click.ClickException(
-                        f"Chunk {chunk_rec.index} is archived in Glacier/Deep Archive "
-                        f"and not available for download.\n"
-                        f"Run 's3duct restore --bucket <bucket> --name {name}' to "
-                        f"initiate thaw, then retry."
+            # Drain remaining
+            while window:
+                try:
+                    prev_chain = _drain_oldest(
+                        window, prev_chain, decrypt,
+                        manifest.encrypted, name, throttle,
+                        tracker=tracker,
                     )
-                raise
-
-            if decrypt and manifest.encrypted:
-                method = encryption_method or manifest.encryption_method or "age"
-                if method == "aes-256-gcm":
-                    dec_path = chunk_path.with_suffix(".dec")
-                    aes_decrypt_file(chunk_path, dec_path, aes_key)
-                else:
-                    dec_path = chunk_path.with_suffix(".dec")
-                    age_decrypt_file(chunk_path, dec_path, age_identity)
-                chunk_path.unlink()
-                chunk_path = dec_path
-
-            skip_integrity = manifest.encrypted and not decrypt
-            if not skip_integrity:
-                dual_hash, size = hash_file(chunk_path)
-                expected = DualHash(sha256=chunk_rec.sha256, sha3_256=chunk_rec.sha3_256)
-
-                if dual_hash != expected:
-                    chunk_path.unlink(missing_ok=True)
-                    raise click.ClickException(
-                        f"Integrity check failed for chunk {chunk_rec.index}. "
-                        "Data may be corrupt."
-                    )
-
-                if size != chunk_rec.size:
-                    chunk_path.unlink(missing_ok=True)
-                    raise click.ClickException(
-                        f"Size mismatch for chunk {chunk_rec.index}: "
-                        f"expected {chunk_rec.size}, got {size}"
-                    )
-
-                chain_hex = compute_chain(dual_hash, prev_chain)
-                prev_chain = bytes.fromhex(chain_hex)
-
-            with open(chunk_path, "rb") as f:
-                while True:
-                    data = f.read(8 * 1024 * 1024)
-                    if not data:
-                        break
-                    sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-
-            chunk_path.unlink(missing_ok=True)
-            elapsed = time.monotonic() - t0
-            tracker.update_chunk(chunk_rec.index, chunk_rec.size, elapsed)
+                except Exception:
+                    _abort_window()
+                    raise
+    finally:
+        for p in deferred_cleanup:
+            p.unlink(missing_ok=True)
+        shutil.rmtree(run_scratch, ignore_errors=True)
 
     # Verify final chain (skip in raw/no-decrypt mode)
     raw_mode = manifest.encrypted and not decrypt

@@ -79,8 +79,3 @@ class BackpressureMonitor:
         if self.free_disk_space() < self._config.chunk_size + safety:
             return False
         return True
-
-    def wait_for_space(self, poll_interval: float = 0.5) -> None:
-        """Block until space is available for the next chunk."""
-        while not self.can_write_chunk():
-            time.sleep(poll_interval)
